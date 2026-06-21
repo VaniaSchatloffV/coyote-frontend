@@ -1,19 +1,57 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="es" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Portal — Coyote</title>
+    <script>
+      (function () {
+        var t = localStorage.getItem("coyote-theme") || "dark";
+        document.documentElement.setAttribute("data-theme", t);
+      })();
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Roboto+Slab:wght@400;600;700&family=Inter:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <header class="topbar">
-      <span class="brand">Coyote — Portal médico</span>
-      <div id="topbar-actions" class="topbar-actions hidden">
-        <button type="button" id="btn-change-password" class="secondary">
-          Cambiar contraseña
+      <div class="brand-group">
+        <svg
+          class="brand-icon"
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 40 40"
+          width="38"
+          height="38"
+          aria-hidden="true"
+        >
+          <path d="M20 2 L35 8 L35 23 Q35 34 20 39 Q5 34 5 23 L5 8 Z" fill="#4ade80"/>
+          <path d="M20 6.5 L31 11 L31 23 Q31 31.5 20 35.5 Q9 31.5 9 23 L9 11 Z" fill="#86efac"/>
+          <rect x="16.5" y="13.5" width="7" height="16" rx="2" fill="white"/>
+          <rect x="12" y="18" width="16" height="7" rx="2" fill="white"/>
+        </svg>
+        <span class="brand">Coyote — Portal médico</span>
+      </div>
+      <div class="topbar-right">
+        <button
+          type="button"
+          id="btn-theme"
+          class="theme-toggle"
+          aria-label="Cambiar tema"
+          title="Cambiar tema"
+        >
+          <span class="theme-icon">🌙</span>
         </button>
-        <button type="button" id="btn-logout">Cerrar sesión</button>
+        <div id="topbar-actions" class="topbar-actions hidden">
+          <button type="button" id="btn-change-password" class="secondary sm">
+            Cambiar contraseña
+          </button>
+          <button type="button" id="btn-logout" class="sm">Cerrar sesión</button>
+        </div>
       </div>
     </header>
     <main id="app" class="container"></main>

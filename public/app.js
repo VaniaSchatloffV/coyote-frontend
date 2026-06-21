@@ -268,8 +268,8 @@ function buildStickyToolbar({
             </select>
           </label>
           <span class="meta page-indicator" id="page-indicator"></span>
-          <button type="button" class="secondary" id="toolbar-prev">Anterior</button>
-          <button type="button" class="secondary" id="toolbar-next">Siguiente</button>
+          <button type="button" class="secondary sm" id="toolbar-prev">Anterior</button>
+          <button type="button" class="secondary sm" id="toolbar-next">Siguiente</button>
         </div>
       </div>
     </div>
@@ -402,8 +402,8 @@ async function renderChat(container, conversationId, route) {
   const wrap = el(`<div class="card"><h1>Conversación</h1></div>`);
 
   const navInner = `
-      <button type="button" class="secondary" id="back-list">Volver al listado</button>
-      <button type="button" class="secondary" id="go-files">Ver archivos</button>
+      <button type="button" class="secondary sm" id="back-list">Volver al listado</button>
+      <button type="button" class="secondary sm" id="go-files">Ver archivos</button>
     `;
   const bar = buildStickyToolbar({
     page,
@@ -499,8 +499,8 @@ async function renderFiles(container, conversationId, route) {
   const wrap = el(`<div class="card"><h1>Archivos de la conversación</h1></div>`);
 
   const navInner = `
-      <button type="button" class="secondary" id="back-list">Volver al listado</button>
-      <button type="button" class="secondary" id="go-chat">Ver chat</button>
+      <button type="button" class="secondary sm" id="back-list">Volver al listado</button>
+      <button type="button" class="secondary sm" id="go-chat">Ver chat</button>
     `;
   const sticky = buildStickyToolbar({
     page,
@@ -658,3 +658,26 @@ if (!location.hash || location.hash === "#") {
   location.replace("#/?p=1&ps=20");
 }
 render();
+
+// Theme toggle
+(function () {
+  const root = document.documentElement;
+  const btn = document.getElementById("btn-theme");
+  const icon = btn && btn.querySelector(".theme-icon");
+
+  function applyTheme(theme) {
+    root.setAttribute("data-theme", theme);
+    localStorage.setItem("coyote-theme", theme);
+    if (icon) icon.textContent = theme === "light" ? "☀️" : "🌙";
+  }
+
+  applyTheme(localStorage.getItem("coyote-theme") || "dark");
+
+  if (btn) {
+    btn.addEventListener("click", () => {
+      const next =
+        root.getAttribute("data-theme") === "light" ? "dark" : "light";
+      applyTheme(next);
+    });
+  }
+})();
