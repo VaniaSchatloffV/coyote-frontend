@@ -453,3 +453,108 @@ th {
   background: var(--border);
   border-radius: 3px;
 }
+
+/* ── Table responsive wrapper ─────────── */
+.table-scroll {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ── Mobile ───────────────────────────── */
+@media (max-width: 640px) {
+  .topbar {
+    padding: 0.6rem 1rem;
+    flex-wrap: nowrap;
+    gap: 0.5rem;
+  }
+
+  .brand {
+    font-size: 0.88rem;
+  }
+
+  .brand-icon {
+    width: 28px;
+    height: 28px;
+  }
+
+  .topbar-actions {
+    gap: 0.35rem;
+  }
+
+  .container {
+    padding: 1rem 0.9rem 3rem;
+  }
+
+  .card {
+    padding: 1.25rem 1rem;
+    border-radius: 14px;
+  }
+
+  .card h1 {
+    font-size: 1.25rem;
+  }
+
+  /* Botones principales más compactos en móvil */
+  button,
+  .btn {
+    font-size: 18px;
+    padding: 0.5rem 1.1rem;
+  }
+
+  .btn.sm,
+  button.sm {
+    font-size: 13px;
+    padding: 0.25rem 0.7rem;
+  }
+
+  input[type="text"],
+  input[type="password"] {
+    max-width: 100%;
+  }
+
+  /* Fila de conversación: apila en columna */
+  .conversation-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .conversation-row > div:last-child {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  /* Toolbar sticky más compacto */
+  .sticky-toolbar {
+    top: 55px;
+    padding: 0.5rem 0.25rem;
+  }
+
+  .toolbar-inner {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .toolbar-pagination {
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  /* Tabla: scroll horizontal en lugar de desbordarse */
+  table {
+    min-width: 480px;
+  }
+
+  th, td {
+    padding: 0.5rem 0.3rem;
+    font-size: 0.82rem;
+  }
+
+  /* Login centrado ocupa más ancho */
+  .login-wrapper .card {
+    max-width: 100%;
+  }
+}

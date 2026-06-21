@@ -556,7 +556,7 @@ async function renderFiles(container, conversationId, route) {
     const name = a.original_filename || a.s3_key || "archivo";
     const link =
       a.download_url != null
-        ? `<a class="btn secondary" href="${escapeAttr(
+        ? `<a class="btn secondary sm" href="${escapeAttr(
             resolveApiUrl(a.download_url)
           )}" download rel="noopener">Descargar</a>`
         : `<span class="meta">Enlace no disponible</span>`;
@@ -570,7 +570,10 @@ async function renderFiles(container, conversationId, route) {
     `);
     tbody.appendChild(tr);
   }
-  wrap.appendChild(table);
+  const tableWrap = document.createElement("div");
+  tableWrap.className = "table-scroll";
+  tableWrap.appendChild(table);
+  wrap.appendChild(tableWrap);
   container.appendChild(wrap);
 }
 
