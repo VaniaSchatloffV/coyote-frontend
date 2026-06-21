@@ -105,14 +105,19 @@ function setTopbarAuthVisible(show) {
 }
 
 async function trySession() {
-  const res = await apiFetch("/auth/me");
-  if (!res.ok) {
+  try {
+    const res = await apiFetch("/auth/me");
+    if (!res.ok) {
+      sessionDoctorId = null;
+      return false;
+    }
+    const me = await res.json();
+    sessionDoctorId = me.doctor_id;
+    return true;
+  } catch {
     sessionDoctorId = null;
     return false;
   }
-  const me = await res.json();
-  sessionDoctorId = me.doctor_id;
-  return true;
 }
 
 function renderLogin(container, errorMsg) {
