@@ -643,6 +643,15 @@ async function render() {
   await renderList(app, route);
 }
 
+function goHome() {
+  if (!sessionDoctorId) return;
+  navTo("list", { page: 1, pageSize: 20 });
+  render();
+}
+
+document.getElementById("btn-home").addEventListener("click", goHome);
+document.getElementById("btn-brand-icon").addEventListener("click", goHome);
+
 document.getElementById("btn-change-password").addEventListener("click", () => {
   location.hash = "#/change-password";
   render();

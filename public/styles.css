@@ -101,6 +101,36 @@ body {
   flex-wrap: wrap;
 }
 
+/* ── Icon buttons (logo + home) ───────── */
+.btn-icon {
+  background: transparent !important;
+  border: none !important;
+  padding: 0.25rem !important;
+  border-radius: 50% !important;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text) !important;
+  box-shadow: none !important;
+  transition: background 0.2s, transform 0.15s !important;
+  font-size: inherit !important;
+  font-family: inherit !important;
+  font-weight: inherit !important;
+  line-height: 1 !important;
+}
+
+.btn-icon:hover:not(:disabled) {
+  background: var(--surface2) !important;
+  transform: scale(1.1) !important;
+  box-shadow: none !important;
+}
+
+.btn-home {
+  color: var(--accent) !important;
+  padding: 0.3rem !important;
+}
+
 /* ── Theme toggle ─────────────────────── */
 .theme-toggle {
   background: var(--surface2) !important;
