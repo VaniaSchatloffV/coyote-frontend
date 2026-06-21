@@ -122,6 +122,7 @@ async function trySession() {
 
 function renderLogin(container, errorMsg) {
   container.innerHTML = "";
+  const wrapper = el(`<div class="login-wrapper"></div>`);
   const card = el(`
     <div class="card">
       <h1>Iniciar sesión</h1>
@@ -136,7 +137,8 @@ function renderLogin(container, errorMsg) {
       </form>
     </div>
   `);
-  container.appendChild(card);
+  wrapper.appendChild(card);
+  container.appendChild(wrapper);
   if (errorMsg) {
     const e = card.querySelector("#login-error");
     e.style.display = "block";
@@ -350,8 +352,8 @@ async function renderList(container, route) {
     )}</div>
         </div>
         <div>
-          <button type="button" data-chat="${c.id}">Ver conversación</button>
-          <button type="button" class="secondary" data-files="${
+          <button type="button" class="sm" data-chat="${c.id}">Ver conversación</button>
+          <button type="button" class="secondary sm" data-files="${
             c.id
           }">Archivos</button>
         </div>

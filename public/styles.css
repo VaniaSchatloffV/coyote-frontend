@@ -269,8 +269,21 @@ button.danger:hover:not(:disabled) {
 
 .btn.sm,
 button.sm {
-  padding: 0.3rem 1rem;
-  font-size: 16px;
+  padding: 0.28rem 0.85rem;
+  font-size: 14px;
+}
+
+/* ── Login centering ──────────────────── */
+.login-wrapper {
+  min-height: calc(100vh - 130px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.login-wrapper .card {
+  width: 100%;
+  max-width: 440px;
 }
 
 /* ── Alerts ───────────────────────────── */
