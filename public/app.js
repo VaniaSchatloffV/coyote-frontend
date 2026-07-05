@@ -11,6 +11,14 @@ function resolveApiUrl(url) {
 }
 
 let sessionDoctorId = null;
+let chatPollInterval = null;
+
+function stopChatPoll() {
+  if (chatPollInterval !== null) {
+    clearInterval(chatPollInterval);
+    chatPollInterval = null;
+  }
+}
 
 function el(html) {
   const t = document.createElement("template");
@@ -371,101 +379,313 @@ async function renderList(container, route) {
   container.appendChild(wrap);
 }
 
+function buildMessageBubble(m) {
+  const isUser = m.role === "user";
+  const isSystem = m.role === "system";
+
+  const time = (() => {
+    try {
+      return new Date(m.created_at).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return "";
+    }
+  })();
+
+  if (isSystem) {
+    const div = document.createElement("div");
+    div.className = "bubble-system";
+    div.dataset.msgId = String(m.id);
+    div.textContent = m.content;
+    return div;
+  }
+
+  const attHtml =
+    m.attachments && m.attachments.length
+      ? m.attachments
+          .map((a) => {
+            const label = escapeHtml(a.original_filename || a.s3_key || "archivo");
+            const href = a.download_url
+              ? escapeAttr(resolveApiUrl(a.download_url))
+              : "#";
+            return a.download_url
+              ? `<div class="att-row"><span class="meta">${label}</span> <a class="btn secondary sm" href="${href}" download>Descargar</a></div>`
+              : `<div class="att-row"><span class="meta">${label}</span></div>`;
+          })
+          .join("")
+      : "";
+
+  const row = document.createElement("div");
+  row.className = `bubble-row ${isUser ? "bubble-user" : "bubble-assistant"}`;
+  row.dataset.msgId = String(m.id);
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.innerHTML =
+    `<div class="bubble-content">${escapeHtml(m.content)}</div>` +
+    (attHtml ? `<div class="attachment-chips">${attHtml}</div>` : "") +
+    `<div class="bubble-time">${escapeHtml(time)}</div>`;
+
+  row.appendChild(bubble);
+  return row;
+}
+
 async function renderChat(container, conversationId, route) {
-  let { page, pageSize } = route;
-  const offset = (page - 1) * pageSize;
-  const res = await apiFetch(
-    `/doctors/${sessionDoctorId}/conversations/${conversationId}/messages?limit=${pageSize}&offset=${offset}`
+  const { pageSize } = route;
+  const CHAT_LIMIT = 50;
+
+  stopChatPoll();
+  container.classList.add("chat-mode");
+  container.innerHTML = `<div class="chat-loading">Cargando conversación…</div>`;
+
+  // 1. Conversation info (phone, bot_enabled)
+  const convRes = await apiFetch(
+    `/doctors/${sessionDoctorId}/conversations/${conversationId}`
   );
-  if (res.status === 401) {
+  if (convRes.status === 401) {
     sessionDoctorId = null;
     location.hash = "#/login";
     await render();
     return;
   }
-  if (res.status === 404) {
+  if (!convRes.ok) {
+    container.classList.remove("chat-mode");
     container.innerHTML = `<div class="card error">Conversación no encontrada.</div>`;
     return;
   }
-  if (!res.ok) {
+  const conv = await convRes.json();
+
+  // 2. Initial messages (newest 50, reversed for display)
+  const msgRes = await apiFetch(
+    `/doctors/${sessionDoctorId}/conversations/${conversationId}/messages?limit=${CHAT_LIMIT}&offset=0`
+  );
+  if (!msgRes.ok) {
+    container.classList.remove("chat-mode");
     container.innerHTML = `<div class="card error">Error al cargar mensajes.</div>`;
     return;
   }
-  const payload = await res.json();
-  const messages = payload.items || [];
-  const total = payload.total ?? 0;
-  const totalPages = total > 0 ? Math.max(1, Math.ceil(total / pageSize)) : 1;
-  if (total > 0 && page > totalPages) {
-    navTo("chat", { conversationId, page: totalPages, pageSize });
-    return;
-  }
+  const msgPayload = await msgRes.json();
+  const initialMessages = (msgPayload.items || []).slice().reverse();
+  let totalMessages = msgPayload.total ?? 0;
 
+  // State
+  const knownMsgIds = new Set(initialMessages.map((m) => m.id));
+  let latestMsgId = initialMessages.length
+    ? Math.max(...initialMessages.map((m) => m.id))
+    : 0;
+  let olderOffset = initialMessages.length;
+  let botEnabled = conv.bot_enabled;
+
+  // 3. Build UI
   container.innerHTML = "";
-  const wrap = el(`<div class="card"><h1>Conversación</h1></div>`);
 
-  const navInner = `
-      <button type="button" class="secondary sm" id="back-list">Volver al listado</button>
-      <button type="button" class="secondary sm" id="go-files">Ver archivos</button>
-    `;
-  const bar = buildStickyToolbar({
-    page,
-    pageSize,
-    total,
-    onPageSizeChange: (ps) =>
-      navTo("chat", { conversationId, page: 1, pageSize: ps }),
-    onPrev: () =>
-      navTo("chat", {
-        conversationId,
-        page: Math.max(1, page - 1),
-        pageSize,
-      }),
-    onNext: () =>
-      navTo("chat", {
-        conversationId,
-        page: Math.min(totalPages, page + 1),
-        pageSize,
-      }),
-    navRowInner: navInner,
-  });
-  wrap.appendChild(bar);
-
-  bar.querySelector("#back-list").addEventListener("click", () =>
-    navTo("list", { page: 1, pageSize })
-  );
-  bar.querySelector("#go-files").addEventListener("click", () =>
-    navTo("files", { conversationId, page: 1, pageSize })
-  );
-
-  const box = document.createElement("div");
-  for (const m of messages) {
-    const roleClass = m.role === "user" ? "user" : "assistant";
-    const attHint =
-      m.attachments && m.attachments.length
-        ? `<div class="attachment-chips">${m.attachments
-            .map((a) => {
-              const label =
-                escapeHtml(a.original_filename || a.s3_key || "archivo");
-              const href = a.download_url
-                ? escapeAttr(resolveApiUrl(a.download_url))
-                : "#";
-              const link = a.download_url
-                ? `<a class="btn secondary sm" href="${href}" download>Descargar</a>`
-                : `<span class="meta">Sin enlace</span>`;
-              return `<div class="att-row"><span class="meta">${label}</span> ${link}</div>`;
-            })
-            .join("")}</div>`
-        : "";
-    const div = el(`
-      <div class="msg ${roleClass}">
-        <div class="meta">${escapeHtml(m.role)} · ${formatDate(m.created_at)}</div>
-        <div>${escapeHtml(m.content)}</div>
-        ${attHint}
+  const wrapper = document.createElement("div");
+  wrapper.className = "chat-wrapper";
+  wrapper.innerHTML = `
+    <div class="chat-header">
+      <div class="chat-header-left">
+        <button type="button" class="secondary sm" id="chat-back">← Listado</button>
+        <button type="button" class="secondary sm" id="chat-files">Archivos</button>
       </div>
-    `);
-    box.appendChild(div);
+      <div class="chat-header-center">
+        <span>${escapeHtml(conv.phone_number)}</span>
+      </div>
+      <div class="chat-header-right">
+        <button type="button" class="bot-toggle-btn ${botEnabled ? "bot-on" : "bot-off"}" id="chat-bot-toggle">
+          <span class="bot-toggle-dot"></span>
+          <span class="bot-toggle-label">${botEnabled ? "Bot ON" : "Bot OFF"}</span>
+        </button>
+      </div>
+    </div>
+    <div class="chat-messages" id="chat-messages">
+      <div class="chat-load-more-wrapper" id="chat-load-more-wrapper" ${totalMessages <= olderOffset ? 'style="display:none"' : ""}>
+        <button type="button" class="secondary sm" id="chat-load-more">Cargar mensajes anteriores</button>
+      </div>
+    </div>
+    <div class="chat-input-bar">
+      <div class="chat-bot-status ${botEnabled ? "bot-status-on" : "bot-status-off"}" id="chat-bot-status">
+        ${botEnabled ? "🤖 Bot activo — respondiendo automáticamente" : "✍️ Bot desactivado — respuesta manual"}
+      </div>
+      <div class="chat-input-row">
+        <textarea id="chat-textarea" placeholder="Escribe un mensaje como el bot…" rows="1"></textarea>
+        <button type="button" class="chat-send-btn" id="chat-send-btn" title="Enviar">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  `;
+  container.appendChild(wrapper);
+
+  const messagesArea = wrapper.querySelector("#chat-messages");
+  const loadMoreWrapper = wrapper.querySelector("#chat-load-more-wrapper");
+  const botToggleBtn = wrapper.querySelector("#chat-bot-toggle");
+  const botStatusEl = wrapper.querySelector("#chat-bot-status");
+  const textarea = wrapper.querySelector("#chat-textarea");
+  const sendBtn = wrapper.querySelector("#chat-send-btn");
+
+  function updateBotUI(enabled) {
+    botEnabled = enabled;
+    botToggleBtn.className = `bot-toggle-btn ${enabled ? "bot-on" : "bot-off"}`;
+    botToggleBtn.querySelector(".bot-toggle-label").textContent = enabled
+      ? "Bot ON"
+      : "Bot OFF";
+    botStatusEl.className = `chat-bot-status ${enabled ? "bot-status-on" : "bot-status-off"}`;
+    botStatusEl.textContent = enabled
+      ? "🤖 Bot activo — respondiendo automáticamente"
+      : "✍️ Bot desactivado — respuesta manual";
   }
-  wrap.appendChild(box);
-  container.appendChild(wrap);
+
+  // Render helpers
+  function appendBubble(m) {
+    if (knownMsgIds.has(m.id)) return;
+    knownMsgIds.add(m.id);
+    if (m.id > latestMsgId) latestMsgId = m.id;
+    messagesArea.appendChild(buildMessageBubble(m));
+  }
+
+  function prependBubbles(msgs) {
+    const anchor = messagesArea.querySelector("[data-msg-id]");
+    for (const m of msgs) {
+      if (knownMsgIds.has(m.id)) continue;
+      knownMsgIds.add(m.id);
+      const bubble = buildMessageBubble(m);
+      anchor
+        ? messagesArea.insertBefore(bubble, anchor)
+        : messagesArea.appendChild(bubble);
+    }
+  }
+
+  // Render initial messages
+  for (const m of initialMessages) appendBubble(m);
+  messagesArea.scrollTop = messagesArea.scrollHeight;
+
+  // Navigation
+  wrapper.querySelector("#chat-back").addEventListener("click", () => {
+    stopChatPoll();
+    navTo("list", { page: 1, pageSize });
+  });
+  wrapper.querySelector("#chat-files").addEventListener("click", () => {
+    stopChatPoll();
+    navTo("files", { conversationId, page: 1, pageSize });
+  });
+
+  // Bot toggle
+  botToggleBtn.addEventListener("click", async () => {
+    botToggleBtn.disabled = true;
+    const res = await apiFetch(
+      `/doctors/${sessionDoctorId}/conversations/${conversationId}/bot`,
+      { method: "PATCH", body: JSON.stringify({ bot_enabled: !botEnabled }) }
+    );
+    botToggleBtn.disabled = false;
+    if (res.ok) {
+      const updated = await res.json();
+      updateBotUI(updated.bot_enabled);
+    }
+  });
+
+  // Textarea auto-resize
+  textarea.addEventListener("input", () => {
+    textarea.style.height = "auto";
+    textarea.style.height = Math.min(textarea.scrollHeight, 120) + "px";
+  });
+
+  // Send on Enter (Shift+Enter = new line)
+  textarea.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      doSend();
+    }
+  });
+  sendBtn.addEventListener("click", doSend);
+
+  async function doSend() {
+    const content = textarea.value.trim();
+    if (!content) return;
+    sendBtn.disabled = true;
+    textarea.disabled = true;
+
+    const res = await apiFetch(
+      `/doctors/${sessionDoctorId}/conversations/${conversationId}/messages`,
+      { method: "POST", body: JSON.stringify({ content }) }
+    );
+
+    sendBtn.disabled = false;
+    textarea.disabled = false;
+    textarea.focus();
+
+    if (!res.ok) return;
+    const newMsg = await res.json();
+    appendBubble(newMsg);
+    textarea.value = "";
+    textarea.style.height = "auto";
+    messagesArea.scrollTop = messagesArea.scrollHeight;
+  }
+
+  // Load more older messages
+  wrapper.querySelector("#chat-load-more").addEventListener("click", async () => {
+    const btn = wrapper.querySelector("#chat-load-more");
+    btn.disabled = true;
+    btn.textContent = "Cargando…";
+
+    const res = await apiFetch(
+      `/doctors/${sessionDoctorId}/conversations/${conversationId}/messages?limit=${CHAT_LIMIT}&offset=${olderOffset}`
+    );
+    if (!res.ok) {
+      btn.disabled = false;
+      btn.textContent = "Cargar mensajes anteriores";
+      return;
+    }
+    const payload = await res.json();
+    const older = (payload.items || []).slice().reverse();
+    totalMessages = payload.total ?? totalMessages;
+
+    const prevScrollHeight = messagesArea.scrollHeight;
+    prependBubbles(older);
+    messagesArea.scrollTop =
+      messagesArea.scrollHeight - prevScrollHeight + messagesArea.scrollTop;
+
+    olderOffset += older.length;
+    if (olderOffset >= totalMessages) {
+      loadMoreWrapper.style.display = "none";
+    } else {
+      btn.disabled = false;
+      btn.textContent = "Cargar mensajes anteriores";
+    }
+  });
+
+  // Polling — check for new messages every 3s
+  async function pollNewMessages() {
+    if (!document.getElementById("chat-messages")) {
+      stopChatPoll();
+      return;
+    }
+    try {
+      const res = await apiFetch(
+        `/doctors/${sessionDoctorId}/conversations/${conversationId}/messages?limit=${CHAT_LIMIT}&offset=0`
+      );
+      if (!res.ok) return;
+      const payload = await res.json();
+      const items = (payload.items || []).slice().reverse();
+      const newItems = items.filter((m) => m.id > latestMsgId);
+      if (!newItems.length) return;
+
+      const atBottom =
+        messagesArea.scrollHeight -
+          messagesArea.scrollTop -
+          messagesArea.clientHeight <
+        80;
+      for (const m of newItems) appendBubble(m);
+      if (atBottom) messagesArea.scrollTop = messagesArea.scrollHeight;
+    } catch {
+      // ignore transient poll errors
+    }
+  }
+
+  chatPollInterval = setInterval(pollNewMessages, 3000);
 }
 
 async function renderFiles(container, conversationId, route) {
@@ -600,8 +820,10 @@ function formatDate(iso) {
 }
 
 async function render() {
+  stopChatPoll();
   const app = document.getElementById("app");
   if (!app) return;
+  app.classList.remove("chat-mode");
 
   const route = parseHash();
   const ok = sessionDoctorId != null ? true : await trySession();
