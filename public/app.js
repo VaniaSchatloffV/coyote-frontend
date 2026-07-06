@@ -471,10 +471,8 @@ async function renderChat(container, conversationId, route) {
   let totalMessages = msgPayload.total ?? 0;
 
   // State
-  const knownMsgIds = new Set(initialMessages.map((m) => m.id));
-  let latestMsgId = initialMessages.length
-    ? Math.max(...initialMessages.map((m) => m.id))
-    : 0;
+  const knownMsgIds = new Set();
+  let latestMsgId = 0;
   let olderOffset = initialMessages.length;
   let botEnabled = conv.bot_enabled;
 
