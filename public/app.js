@@ -308,11 +308,11 @@ function buildStickyToolbar({
 function convTagClass(tag) {
   if (!tag) return "blue";
   switch (tag) {
-    case "Agendamiento": return "green";
+    case "Agendamiento":              return "green";
     case "Requiere asistente humano": return "red";
-    case "Conversacion finalizada": return "gray";
-    case "Mal uso del bot": return "orange";
-    default: return "blue";
+    case "Conversacion finalizada":   return "purple";
+    case "Mal uso del bot":           return "red";
+    default:                          return "blue";
   }
 }
 
@@ -340,12 +340,20 @@ async function renderList(container, route) {
     { key: "Preguntas frecuentes",      cls: "blue"   },
     { key: "Agendamiento",              cls: "green"  },
     { key: "Requiere asistente humano", cls: "red"    },
-    { key: "Conversacion finalizada",   cls: "gray"   },
-    { key: "Mal uso del bot",           cls: "orange" },
+    { key: "Conversacion finalizada",   cls: "purple" },
+    { key: "Mal uso del bot",           cls: "red"    },
   ];
 
-  const filterRow = document.createElement("div");
-  filterRow.className = "conv-filter-row";
+  const filterWrap = document.createElement("div");
+  filterWrap.className = "conv-filter-wrap";
+
+  // Fila 1: Todos + Sin clasificar (centrada)
+  const filterRow1 = document.createElement("div");
+  filterRow1.className = "conv-filter-row";
+
+  // Fila 2: tags individuales (centrada)
+  const filterRow2 = document.createElement("div");
+  filterRow2.className = "conv-filter-row";
 
   function updateFilterPillStates() {
     const noFilter = listTagFilter.size === 0;
@@ -357,7 +365,7 @@ async function renderList(container, route) {
     nonePill.classList.toggle("filter-pill-active", listTagFilter.has("__none__"));
   }
 
-  // "Todos" pill
+  // "Todos" pill → fila 1
   const allPill = document.createElement("button");
   allPill.type = "button";
   allPill.className = "filter-pill filter-pill-all" + (listTagFilter.size === 0 ? " filter-pill-all-active" : "");
@@ -367,9 +375,22 @@ async function renderList(container, route) {
     updateFilterPillStates();
     loadData(1);
   });
-  filterRow.appendChild(allPill);
+  filterRow1.appendChild(allPill);
 
-  // Tag pills
+  // "Sin clasificar" pill → fila 1
+  const nonePill = document.createElement("button");
+  nonePill.type = "button";
+  nonePill.className = "filter-pill filter-pill-tag filter-pill-none" + (listTagFilter.has("__none__") ? " filter-pill-active" : "");
+  nonePill.textContent = "Sin clasificar";
+  nonePill.addEventListener("click", () => {
+    if (listTagFilter.has("__none__")) listTagFilter.delete("__none__");
+    else listTagFilter.add("__none__");
+    updateFilterPillStates();
+    loadData(1);
+  });
+  filterRow1.appendChild(nonePill);
+
+  // Tag pills → fila 2
   const pillMap = new Map();
   for (const { key, cls } of FILTER_TAGS) {
     const pill = document.createElement("button");
@@ -383,23 +404,12 @@ async function renderList(container, route) {
       loadData(1);
     });
     pillMap.set(key, pill);
-    filterRow.appendChild(pill);
+    filterRow2.appendChild(pill);
   }
 
-  // "Sin clasificar" pill
-  const nonePill = document.createElement("button");
-  nonePill.type = "button";
-  nonePill.className = "filter-pill filter-pill-tag filter-pill-none" + (listTagFilter.has("__none__") ? " filter-pill-active" : "");
-  nonePill.textContent = "Sin clasificar";
-  nonePill.addEventListener("click", () => {
-    if (listTagFilter.has("__none__")) listTagFilter.delete("__none__");
-    else listTagFilter.add("__none__");
-    updateFilterPillStates();
-    loadData(1);
-  });
-  filterRow.appendChild(nonePill);
-
-  wrap.appendChild(filterRow);
+  filterWrap.appendChild(filterRow1);
+  filterWrap.appendChild(filterRow2);
+  wrap.appendChild(filterWrap);
   // ── End filter pills ──────────────────────────────────────────────────────
 
   const toolbarSlot = document.createElement("div");
