@@ -366,6 +366,12 @@ button.sm {
   flex-wrap: wrap;
 }
 
+.tag-info-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .tag-info-text {
   font-size: 0.78rem;
   color: var(--muted);

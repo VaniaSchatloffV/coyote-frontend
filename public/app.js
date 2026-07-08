@@ -359,9 +359,13 @@ async function renderList(container, route) {
   const nextTagText = document.createElement("span");
   nextTagText.className = "tag-info-text";
 
+  const tagInfoCol = document.createElement("div");
+  tagInfoCol.className = "tag-info-col";
+  tagInfoCol.appendChild(lastTagText);
+  tagInfoCol.appendChild(nextTagText);
+
   tagRow.appendChild(tagBtn);
-  tagRow.appendChild(lastTagText);
-  tagRow.appendChild(nextTagText);
+  tagRow.appendChild(tagInfoCol);
   wrap.appendChild(tagRow);
 
   function getNextAutoRun() {
