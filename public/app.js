@@ -484,7 +484,7 @@ async function renderList(container, route) {
           <div class="conv-info">
             ${nameHtml}
             <strong>${escapeHtml(c.phone_number)}</strong>
-            <div class="meta">ID ${c.id} · Actualizado: ${formatDate(c.updated_at)}</div>
+            <div class="meta">Actualizado: ${formatDate(c.updated_at)}</div>
             ${tagHtml}
           </div>
           <div class="conv-actions">

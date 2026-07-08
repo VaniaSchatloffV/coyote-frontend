@@ -464,6 +464,7 @@ button.sm {
 /* ── Conversation tag badges ──────────── */
 .conv-tag {
   display: inline-block;
+  align-self: flex-start;
   padding: 2px 9px;
   border-radius: 20px;
   font-size: 0.7rem;
