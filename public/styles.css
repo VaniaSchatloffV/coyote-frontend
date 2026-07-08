@@ -331,6 +331,89 @@ button.sm {
   font-weight: 500;
 }
 
+/* ── Search bar ───────────────────────── */
+.search-bar-wrap {
+  margin-bottom: 0.75rem;
+}
+
+.search-input {
+  width: 100%;
+  max-width: 100%;
+  padding: 0.55rem 1.1rem;
+  border-radius: var(--radius-input);
+  border: 1.5px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.95rem;
+  font-family: "Inter", system-ui, sans-serif;
+  margin-bottom: 0;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s, background-color 0.3s;
+  display: block;
+}
+
+.search-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* ── Filter pills ─────────────────────── */
+.conv-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.9rem;
+}
+
+.filter-pill {
+  display: inline-flex !important;
+  align-items: center;
+  padding: 3px 11px !important;
+  border-radius: 20px !important;
+  font-size: 0.7rem !important;
+  font-weight: 600 !important;
+  font-family: "Inter", system-ui, sans-serif !important;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  border: 1.5px solid var(--border) !important;
+  background: transparent !important;
+  color: var(--muted) !important;
+  box-shadow: none !important;
+  transition: border-color 0.15s, color 0.15s, background 0.15s !important;
+  line-height: 1.4;
+}
+
+.filter-pill:hover:not(:disabled) {
+  border-color: var(--text) !important;
+  color: var(--text) !important;
+  background: transparent !important;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+/* "Todos" active */
+.filter-pill-all-active {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+  background: var(--accent-glow) !important;
+}
+
+/* Tag pills active — reutiliza los colores del badge */
+.filter-pill-tag.filter-pill-active.filter-pill-blue   { background: rgba(59,130,246,0.15) !important; color: #60a5fa !important; border-color: rgba(59,130,246,0.5) !important; }
+.filter-pill-tag.filter-pill-active.filter-pill-green  { background: rgba(34,197,94,0.15)  !important; color: #4ade80 !important; border-color: rgba(34,197,94,0.5)  !important; }
+.filter-pill-tag.filter-pill-active.filter-pill-red    { background: rgba(239,68,68,0.15)  !important; color: #f87171 !important; border-color: rgba(239,68,68,0.5)  !important; }
+.filter-pill-tag.filter-pill-active.filter-pill-gray   { background: rgba(107,114,128,0.15)!important; color: #9ca3af !important; border-color: rgba(107,114,128,0.5)!important; }
+.filter-pill-tag.filter-pill-active.filter-pill-orange { background: rgba(249,115,22,0.15) !important; color: #fb923c !important; border-color: rgba(249,115,22,0.5) !important; }
+.filter-pill-tag.filter-pill-active.filter-pill-none   { background: rgba(148,163,184,0.15)!important; color: #94a3b8 !important; border-color: rgba(148,163,184,0.5)!important; }
+
+/* Light theme adjustments */
+[data-theme="light"] .filter-pill-tag.filter-pill-active.filter-pill-blue   { background: rgba(59,130,246,0.1) !important; color: #2563eb !important; border-color: rgba(59,130,246,0.4) !important; }
+[data-theme="light"] .filter-pill-tag.filter-pill-active.filter-pill-green  { background: rgba(22,163,74,0.1)  !important; color: #16a34a !important; border-color: rgba(22,163,74,0.4)  !important; }
+[data-theme="light"] .filter-pill-tag.filter-pill-active.filter-pill-red    { background: rgba(220,38,38,0.1)  !important; color: #dc2626 !important; border-color: rgba(220,38,38,0.4)  !important; }
+[data-theme="light"] .filter-pill-tag.filter-pill-active.filter-pill-gray   { background: rgba(75,85,99,0.1)   !important; color: #4b5563 !important; border-color: rgba(75,85,99,0.4)   !important; }
+[data-theme="light"] .filter-pill-tag.filter-pill-active.filter-pill-orange { background: rgba(234,88,12,0.1)  !important; color: #ea580c !important; border-color: rgba(234,88,12,0.4)  !important; }
+[data-theme="light"] .filter-pill-tag.filter-pill-active.filter-pill-none   { background: rgba(100,116,139,0.1)!important; color: #64748b !important; border-color: rgba(100,116,139,0.4)!important; }
+
 /* ── Conversation rows ────────────────── */
 .conversation-row {
   display: flex;
@@ -350,6 +433,89 @@ button.sm {
 
 .conversation-row:hover {
   background: var(--surface2);
+}
+
+.conv-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.conv-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.contact-name {
+  font-size: 0.88rem;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ── Conversation tag badges ──────────── */
+.conv-tag {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 20px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  margin-top: 3px;
+  border: 1px solid transparent;
+}
+
+.conv-tag-blue {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border-color: rgba(59, 130, 246, 0.3);
+}
+.conv-tag-green {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.3);
+}
+.conv-tag-red {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.3);
+}
+.conv-tag-gray {
+  background: rgba(107, 114, 128, 0.15);
+  color: #9ca3af;
+  border-color: rgba(107, 114, 128, 0.3);
+}
+.conv-tag-orange {
+  background: rgba(249, 115, 22, 0.15);
+  color: #fb923c;
+  border-color: rgba(249, 115, 22, 0.3);
+}
+
+[data-theme="light"] .conv-tag-blue {
+  background: rgba(59, 130, 246, 0.1);
+  color: #2563eb;
+  border-color: rgba(59, 130, 246, 0.35);
+}
+[data-theme="light"] .conv-tag-green {
+  background: rgba(22, 163, 74, 0.1);
+  color: #16a34a;
+  border-color: rgba(22, 163, 74, 0.35);
+}
+[data-theme="light"] .conv-tag-red {
+  background: rgba(220, 38, 38, 0.1);
+  color: #dc2626;
+  border-color: rgba(220, 38, 38, 0.35);
+}
+[data-theme="light"] .conv-tag-gray {
+  background: rgba(75, 85, 99, 0.1);
+  color: #4b5563;
+  border-color: rgba(75, 85, 99, 0.35);
+}
+[data-theme="light"] .conv-tag-orange {
+  background: rgba(234, 88, 12, 0.1);
+  color: #ea580c;
+  border-color: rgba(234, 88, 12, 0.35);
 }
 
 .meta {
@@ -835,7 +1001,7 @@ th {
     gap: 0.5rem;
   }
 
-  .conversation-row > div:last-child {
+  .conv-actions {
     display: flex;
     gap: 0.5rem;
     flex-wrap: wrap;

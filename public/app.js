@@ -12,6 +12,9 @@ function resolveApiUrl(url) {
 
 let sessionDoctorId = null;
 let chatPollInterval = null;
+let listSearchQuery = "";
+let listSearchDebounce = null;
+let listTagFilter = new Set();
 
 function stopChatPoll() {
   if (chatPollInterval !== null) {
@@ -302,81 +305,203 @@ function buildStickyToolbar({
   return bar;
 }
 
+function convTagClass(tag) {
+  if (!tag) return "blue";
+  switch (tag) {
+    case "Agendamiento": return "green";
+    case "Requiere asistente humano": return "red";
+    case "Conversacion finalizada": return "gray";
+    case "Mal uso del bot": return "orange";
+    default: return "blue";
+  }
+}
+
 async function renderList(container, route) {
   let { page, pageSize } = route;
-  const offset = (page - 1) * pageSize;
-  const res = await apiFetch(
-    `/doctors/${sessionDoctorId}/conversations?limit=${pageSize}&offset=${offset}`
-  );
-  if (res.status === 401) {
-    sessionDoctorId = null;
-    location.hash = "#/login";
-    await render();
-    return;
-  }
-  if (!res.ok) {
-    container.innerHTML = `<div class="card error">No se pudo cargar la lista.</div>`;
-    return;
-  }
-  const body = await res.json();
-  const items = body.items || [];
-  const total = body.total ?? 0;
-  const totalPages = total > 0 ? Math.max(1, Math.ceil(total / pageSize)) : 1;
-  if (total > 0 && page > totalPages) {
-    navTo("list", { page: totalPages, pageSize });
-    return;
-  }
 
   container.innerHTML = "";
+  container.classList.remove("chat-mode");
+
   const wrap = el(`<div class="card"><h1>Conversaciones</h1></div>`);
 
-  const navInner = `<span class="toolbar-spacer"></span>`;
-  const sticky = buildStickyToolbar({
-    page,
-    pageSize,
-    total,
-    onPageSizeChange: (ps) => navTo("list", { page: 1, pageSize: ps }),
-    onPrev: () => navTo("list", { page: Math.max(1, page - 1), pageSize }),
-    onNext: () =>
-      navTo("list", {
-        page: Math.min(totalPages, page + 1),
-        pageSize,
-      }),
-    navRowInner: navInner,
-  });
-  wrap.appendChild(sticky);
+  // Search bar (created once — not destroyed on data reload)
+  const searchWrap = el(`
+    <div class="search-bar-wrap">
+      <input type="text" id="conv-search" class="search-input"
+        placeholder="Buscar por nombre o número…" autocomplete="off" />
+    </div>
+  `);
+  const searchInp = searchWrap.querySelector("#conv-search");
+  searchInp.value = listSearchQuery;
+  wrap.appendChild(searchWrap);
 
-  const list = document.createElement("div");
-  if (!items.length) {
-    list.innerHTML = `<p class="meta">No hay conversaciones.</p>`;
+  // ── Filter pills ──────────────────────────────────────────────────────────
+  const FILTER_TAGS = [
+    { key: "Preguntas frecuentes",      cls: "blue"   },
+    { key: "Agendamiento",              cls: "green"  },
+    { key: "Requiere asistente humano", cls: "red"    },
+    { key: "Conversacion finalizada",   cls: "gray"   },
+    { key: "Mal uso del bot",           cls: "orange" },
+  ];
+
+  const filterRow = document.createElement("div");
+  filterRow.className = "conv-filter-row";
+
+  function updateFilterPillStates() {
+    const noFilter = listTagFilter.size === 0;
+    allPill.classList.toggle("filter-pill-all-active", noFilter);
+    for (const { key } of FILTER_TAGS) {
+      const p = pillMap.get(key);
+      if (p) p.classList.toggle("filter-pill-active", listTagFilter.has(key));
+    }
+    nonePill.classList.toggle("filter-pill-active", listTagFilter.has("__none__"));
   }
-  for (const c of items) {
-    const row = el(`
-      <div class="conversation-row">
-        <div>
-          <strong>${escapeHtml(c.phone_number)}</strong>
-          <div class="meta">ID ${c.id} · Actualizado: ${formatDate(
-      c.updated_at
-    )}</div>
-        </div>
-        <div>
-          <button type="button" class="sm" data-chat="${c.id}">Ver conversación</button>
-          <button type="button" class="secondary sm" data-files="${
-            c.id
-          }">Archivos</button>
-        </div>
-      </div>
-    `);
-    row.querySelector(`[data-chat]`).addEventListener("click", () => {
-      navTo("chat", { conversationId: c.id, page: 1, pageSize });
+
+  // "Todos" pill
+  const allPill = document.createElement("button");
+  allPill.type = "button";
+  allPill.className = "filter-pill filter-pill-all" + (listTagFilter.size === 0 ? " filter-pill-all-active" : "");
+  allPill.textContent = "Todos";
+  allPill.addEventListener("click", () => {
+    listTagFilter.clear();
+    updateFilterPillStates();
+    loadData(1);
+  });
+  filterRow.appendChild(allPill);
+
+  // Tag pills
+  const pillMap = new Map();
+  for (const { key, cls } of FILTER_TAGS) {
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = `filter-pill filter-pill-tag filter-pill-${cls}` + (listTagFilter.has(key) ? " filter-pill-active" : "");
+    pill.textContent = key;
+    pill.addEventListener("click", () => {
+      if (listTagFilter.has(key)) listTagFilter.delete(key);
+      else listTagFilter.add(key);
+      updateFilterPillStates();
+      loadData(1);
     });
-    row.querySelector(`[data-files]`).addEventListener("click", () => {
-      navTo("files", { conversationId: c.id, page: 1, pageSize });
-    });
-    list.appendChild(row);
+    pillMap.set(key, pill);
+    filterRow.appendChild(pill);
   }
-  wrap.appendChild(list);
+
+  // "Sin clasificar" pill
+  const nonePill = document.createElement("button");
+  nonePill.type = "button";
+  nonePill.className = "filter-pill filter-pill-tag filter-pill-none" + (listTagFilter.has("__none__") ? " filter-pill-active" : "");
+  nonePill.textContent = "Sin clasificar";
+  nonePill.addEventListener("click", () => {
+    if (listTagFilter.has("__none__")) listTagFilter.delete("__none__");
+    else listTagFilter.add("__none__");
+    updateFilterPillStates();
+    loadData(1);
+  });
+  filterRow.appendChild(nonePill);
+
+  wrap.appendChild(filterRow);
+  // ── End filter pills ──────────────────────────────────────────────────────
+
+  const toolbarSlot = document.createElement("div");
+  const listEl = document.createElement("div");
+  wrap.appendChild(toolbarSlot);
+  wrap.appendChild(listEl);
   container.appendChild(wrap);
+
+  async function loadData(p) {
+    page = p;
+    const offset = (page - 1) * pageSize;
+    const search = listSearchQuery.trim();
+    let apiPath = `/doctors/${sessionDoctorId}/conversations?limit=${pageSize}&offset=${offset}`;
+    if (search) apiPath += `&search=${encodeURIComponent(search)}`;
+    if (listTagFilter.size > 0) {
+      apiPath += `&tags=${encodeURIComponent(Array.from(listTagFilter).join(","))}`;
+    }
+
+    const res = await apiFetch(apiPath);
+    if (res.status === 401) {
+      sessionDoctorId = null;
+      location.hash = "#/login";
+      await render();
+      return;
+    }
+    if (!res.ok) {
+      listEl.innerHTML = `<div class="error" style="padding:1rem">No se pudo cargar la lista.</div>`;
+      return;
+    }
+
+    const body = await res.json();
+    const items = body.items || [];
+    const total = body.total ?? 0;
+    const totalPages = total > 0 ? Math.max(1, Math.ceil(total / pageSize)) : 1;
+
+    if (total > 0 && page > totalPages) {
+      await loadData(totalPages);
+      return;
+    }
+
+    // Rebuild toolbar
+    toolbarSlot.innerHTML = "";
+    const sticky = buildStickyToolbar({
+      page,
+      pageSize,
+      total,
+      onPageSizeChange: (ps) => { pageSize = ps; loadData(1); },
+      onPrev: () => loadData(Math.max(1, page - 1)),
+      onNext: () => loadData(Math.min(totalPages, page + 1)),
+      navRowInner: `<span class="toolbar-spacer"></span>`,
+    });
+    toolbarSlot.appendChild(sticky);
+
+    // Rebuild list items
+    listEl.innerHTML = "";
+    if (!items.length) {
+      const msg = search ? "No hay conversaciones que coincidan." : "No hay conversaciones.";
+      listEl.innerHTML = `<p class="meta">${escapeHtml(msg)}</p>`;
+      return;
+    }
+
+    for (const c of items) {
+      const nameHtml = c.contact_name
+        ? `<span class="contact-name">${escapeHtml(c.contact_name)}</span>`
+        : "";
+      const tagHtml = c.classification_tag
+        ? `<span class="conv-tag conv-tag-${convTagClass(c.classification_tag)}">${escapeHtml(c.classification_tag)}</span>`
+        : "";
+
+      const row = el(`
+        <div class="conversation-row">
+          <div class="conv-info">
+            ${nameHtml}
+            <strong>${escapeHtml(c.phone_number)}</strong>
+            <div class="meta">ID ${c.id} · Actualizado: ${formatDate(c.updated_at)}</div>
+            ${tagHtml}
+          </div>
+          <div class="conv-actions">
+            <button type="button" class="sm" data-chat="${c.id}">Ver conversación</button>
+            <button type="button" class="secondary sm" data-files="${c.id}">Archivos</button>
+          </div>
+        </div>
+      `);
+      row.querySelector(`[data-chat]`).addEventListener("click", () => {
+        navTo("chat", { conversationId: c.id, page: 1, pageSize });
+      });
+      row.querySelector(`[data-files]`).addEventListener("click", () => {
+        navTo("files", { conversationId: c.id, page: 1, pageSize });
+      });
+      listEl.appendChild(row);
+    }
+  }
+
+  searchInp.addEventListener("input", () => {
+    clearTimeout(listSearchDebounce);
+    listSearchDebounce = setTimeout(() => {
+      listSearchQuery = searchInp.value;
+      loadData(1);
+    }, 300);
+  });
+
+  await loadData(page);
 }
 
 function buildMessageBubble(m) {
