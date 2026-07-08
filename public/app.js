@@ -15,6 +15,15 @@ let chatPollInterval = null;
 let listSearchQuery = "";
 let listSearchDebounce = null;
 let listTagFilter = new Set();
+let lastTagAt = null;
+let tagTimerInterval = null;
+
+function stopTagTimer() {
+  if (tagTimerInterval !== null) {
+    clearInterval(tagTimerInterval);
+    tagTimerInterval = null;
+  }
+}
 
 function stopChatPoll() {
   if (chatPollInterval !== null) {
@@ -334,6 +343,94 @@ async function renderList(container, route) {
   const searchInp = searchWrap.querySelector("#conv-search");
   searchInp.value = listSearchQuery;
   wrap.appendChild(searchWrap);
+
+  // ── Tag action row ───────────────────────────────────────────────────────
+  const tagRow = document.createElement("div");
+  tagRow.className = "tag-action-row";
+
+  const tagBtn = document.createElement("button");
+  tagBtn.type = "button";
+  tagBtn.className = "sm muted";
+  tagBtn.textContent = "Taggear";
+
+  const lastTagText = document.createElement("span");
+  lastTagText.className = "tag-info-text";
+
+  const nextTagText = document.createElement("span");
+  nextTagText.className = "tag-info-text";
+
+  tagRow.appendChild(tagBtn);
+  tagRow.appendChild(lastTagText);
+  tagRow.appendChild(nextTagText);
+  wrap.appendChild(tagRow);
+
+  function getNextAutoRun() {
+    const now = new Date();
+    const next = new Date(now);
+    next.setMinutes(0, 0, 0);
+    next.setHours(next.getHours() + 1);
+    return next;
+  }
+
+  function updateNextTagText() {
+    const next = getNextAutoRun();
+    const hh = String(next.getHours()).padStart(2, "0");
+    const mm = String(next.getMinutes()).padStart(2, "0");
+    nextTagText.textContent = `Próximo Tag Automático: ${hh}:${mm}`;
+  }
+
+  function updateLastTagText() {
+    if (!lastTagAt) {
+      lastTagText.textContent = "Último Tag: --:--";
+      return;
+    }
+    const elapsed = Math.max(0, Math.floor((Date.now() - lastTagAt.getTime()) / 1000));
+    const m = Math.floor(elapsed / 60);
+    const s = elapsed % 60;
+    lastTagText.textContent = `Último Tag: ${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+
+  updateNextTagText();
+  updateLastTagText();
+
+  // Fetch last run time from backend
+  apiFetch(`/doctors/${sessionDoctorId}/classify/status`).then(async (res) => {
+    if (res.ok) {
+      const data = await res.json();
+      if (data.last_run_at) {
+        lastTagAt = new Date(data.last_run_at);
+        updateLastTagText();
+      }
+    }
+  });
+
+  // Live timer
+  stopTagTimer();
+  tagTimerInterval = setInterval(() => {
+    updateLastTagText();
+    updateNextTagText();
+  }, 1000);
+
+  tagBtn.addEventListener("click", async () => {
+    tagBtn.disabled = true;
+    tagBtn.textContent = "Taggeando…";
+    try {
+      const res = await apiFetch(
+        `/doctors/${sessionDoctorId}/conversations/classify`,
+        { method: "POST" }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        lastTagAt = new Date(data.ran_at);
+        updateLastTagText();
+        await loadData(page);
+      }
+    } finally {
+      tagBtn.disabled = false;
+      tagBtn.textContent = "Taggear";
+    }
+  });
+  // ── End tag action row ────────────────────────────────────────────────────
 
   // ── Filter pills ──────────────────────────────────────────────────────────
   const FILTER_TAGS = [
@@ -954,6 +1051,7 @@ function formatDate(iso) {
 
 async function render() {
   stopChatPoll();
+  stopTagTimer();
   const app = document.getElementById("app");
   if (!app) return;
   app.classList.remove("chat-mode");
