@@ -309,7 +309,7 @@ function convTagClass(tag) {
   if (!tag) return "blue";
   switch (tag) {
     case "Agendamiento":              return "green";
-    case "Requiere asistente humano": return "red";
+    case "Requiere asistente humano": return "orange";
     case "Conversacion finalizada":   return "purple";
     case "Mal uso del bot":           return "red";
     default:                          return "blue";
@@ -339,7 +339,7 @@ async function renderList(container, route) {
   const FILTER_TAGS = [
     { key: "Preguntas frecuentes",      cls: "blue"   },
     { key: "Agendamiento",              cls: "green"  },
-    { key: "Requiere asistente humano", cls: "red"    },
+    { key: "Requiere asistente humano", cls: "orange" },
     { key: "Conversacion finalizada",   cls: "purple" },
     { key: "Mal uso del bot",           cls: "red"    },
   ];
