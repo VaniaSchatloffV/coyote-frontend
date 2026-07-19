@@ -60,13 +60,19 @@
 }
 
 /* ── Body ─────────────────────────────── */
+html {
+  height: 100%;
+}
+
 body {
   margin: 0;
   font-family: "Inter", "Segoe UI", system-ui, sans-serif;
   background: var(--syringe-bg), var(--bg-grad);
   background-attachment: fixed;
   color: var(--text);
-  min-height: 100vh;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
@@ -83,6 +89,7 @@ body {
   position: sticky;
   top: 0;
   z-index: 100;
+  flex-shrink: 0;
   transition: background-color 0.3s ease, border-color 0.3s ease;
 }
 
@@ -114,11 +121,161 @@ body {
   gap: 0.65rem;
 }
 
-.topbar-actions {
+/* ── Layout (sidebar + content) ──────────── */
+.layout {
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  transition: width 0.2s ease, background-color 0.3s ease, border-color 0.3s ease;
+}
+
+.sidebar.collapsed {
+  width: 76px;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 1rem 0.75rem;
+}
+
+.sidebar-link {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--radius-btn);
+  color: var(--muted);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.92rem;
+  white-space: nowrap;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.sidebar-link:hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+
+.sidebar-link.active {
+  background: var(--accent-glow);
+  color: var(--accent);
+}
+
+.sidebar-icon {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.sidebar.collapsed .sidebar-link {
+  justify-content: center;
+}
+
+.sidebar-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.sidebar-collapse-btn,
+.sidebar-action,
+.sidebar-logout {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: var(--radius-btn);
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-family: "Inter", system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 0.88rem;
+  cursor: pointer;
+  box-shadow: none;
+  white-space: nowrap;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.sidebar-collapse-btn svg {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  transition: transform 0.2s ease;
+}
+
+.sidebar-collapse-btn:hover:not(:disabled),
+.sidebar-action:hover:not(:disabled),
+.sidebar-logout:hover:not(:disabled) {
+  background: var(--surface2);
+  color: var(--text);
+  transform: none;
+  box-shadow: none;
+  filter: none;
+}
+
+.sidebar.collapsed .sidebar-collapse-btn svg {
+  transform: rotate(180deg);
+}
+
+.sidebar.collapsed .sidebar-collapse-btn,
+.sidebar.collapsed .sidebar-action,
+.sidebar.collapsed .sidebar-logout {
+  justify-content: center;
+}
+
+.sidebar.collapsed .sidebar-label {
+  display: none;
+}
+
+.sidebar-mobile-toggle {
+  display: none;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0.3rem !important;
+  color: var(--text) !important;
+  cursor: pointer;
+}
+
+.sidebar-mobile-toggle svg {
+  width: 22px;
+  height: 22px;
+}
+
+.sidebar-backdrop {
+  display: none;
+}
+
+.layout-main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
 }
 
 /* ── Icon buttons (logo + home) ───────── */
@@ -178,6 +335,56 @@ body {
   max-width: 980px;
   margin: 0 auto;
   padding: 2rem 1.5rem 4rem;
+}
+
+/* ── Dashboard ─────────────────────────── */
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 1.5rem;
+}
+
+.metric-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 1.25rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.metric-value {
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.metric-label {
+  margin-top: 0.35rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.dashboard-tag-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.dashboard-tag-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-btn);
+}
+
+.dashboard-tag-count {
+  font-weight: 700;
+  color: var(--text);
 }
 
 .hidden {
@@ -606,7 +813,7 @@ button.muted:hover:not(:disabled) {
 
 .sticky-toolbar {
   position: sticky;
-  top: 63px;
+  top: 0;
   z-index: 20;
   margin: -0.5rem -0.25rem 1.25rem;
   padding: 0.7rem 0.25rem;
@@ -717,7 +924,7 @@ th {
   padding: 0;
   max-width: 100%;
   margin: 0;
-  height: calc(100vh - 63px);
+  height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1014,8 +1221,44 @@ th {
     height: 28px;
   }
 
-  .topbar-actions {
-    gap: 0.35rem;
+  .sidebar-mobile-toggle:not(.hidden) {
+    display: inline-flex;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    width: 240px;
+    transform: translateX(-100%);
+    z-index: 200;
+    box-shadow: var(--shadow);
+    transition: transform 0.2s ease;
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  .sidebar.collapsed {
+    width: 240px;
+  }
+
+  .sidebar.collapsed .sidebar-label {
+    display: inline;
+  }
+
+  .sidebar-collapse-btn {
+    display: none;
+  }
+
+  .sidebar-backdrop:not(.hidden) {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 150;
   }
 
   .container {
@@ -1064,7 +1307,7 @@ th {
 
   /* Toolbar sticky más compacto */
   .sticky-toolbar {
-    top: 55px;
+    top: 0;
     padding: 0.5rem 0.25rem;
   }
 
@@ -1096,7 +1339,7 @@ th {
 
   /* Chat mobile */
   #app.chat-mode {
-    height: calc(100vh - 55px);
+    height: 100%;
   }
 
   .chat-header {
