@@ -87,17 +87,21 @@ function parseHash() {
       pageSize,
     };
   }
+  if (parts[0] === "conversations" && !parts[1]) {
+    return { view: "list", page, pageSize };
+  }
   if (parts[0] === "login") {
     return { view: "login", page: 1, pageSize: 20 };
   }
   if (parts[0] === "change-password") {
     return { view: "change-password", page: 1, pageSize: 20 };
   }
-  return { view: "list", page, pageSize };
+  // Empty path (#/) and any unrecognized path resolve to the dashboard (new home).
+  return { view: "dashboard", page, pageSize };
 }
 
 /**
- * @param {"list"|"chat"|"files"} view
+ * @param {"dashboard"|"list"|"chat"|"files"} view
  * @param {{ conversationId?: number, page?: number, pageSize?: number }} opts
  */
 function navTo(view, opts = {}) {
@@ -107,21 +111,42 @@ function navTo(view, opts = {}) {
   qs.set("p", String(page));
   qs.set("ps", String(pageSize));
   const q = qs.toString();
-  if (view === "list") {
-    location.hash = `#/?${q}`;
+  if (view === "dashboard") {
+    location.hash = `#/`;
+  } else if (view === "list") {
+    location.hash = `#/conversations?${q}`;
   } else if (view === "chat" && opts.conversationId != null) {
     location.hash = `#/conversations/${opts.conversationId}/chat?${q}`;
   } else if (view === "files" && opts.conversationId != null) {
     location.hash = `#/conversations/${opts.conversationId}/files?${q}`;
   } else {
-    location.hash = `#/?${q}`;
+    location.hash = `#/`;
   }
 }
 
-function setTopbarAuthVisible(show) {
-  const actions = document.getElementById("topbar-actions");
-  if (!actions) return;
-  actions.classList.toggle("hidden", !show);
+function setSidebarVisible(show) {
+  const sidebar = document.getElementById("sidebar");
+  const mobileToggle = document.getElementById("btn-sidebar-toggle");
+  if (sidebar) sidebar.classList.toggle("hidden", !show);
+  if (mobileToggle) mobileToggle.classList.toggle("hidden", !show);
+  if (!show) closeMobileSidebar();
+}
+
+function closeMobileSidebar() {
+  const sidebar = document.getElementById("sidebar");
+  const backdrop = document.getElementById("sidebar-backdrop");
+  if (sidebar) sidebar.classList.remove("open");
+  if (backdrop) backdrop.classList.add("hidden");
+}
+
+function updateActiveNav(view) {
+  const activeRoute =
+    view === "list" || view === "chat" || view === "files"
+      ? "conversations"
+      : "dashboard";
+  document.querySelectorAll(".sidebar-link").forEach((link) => {
+    link.classList.toggle("active", link.dataset.route === activeRoute);
+  });
 }
 
 async function trySession() {
@@ -178,7 +203,7 @@ function renderLogin(container, errorMsg) {
     }
     const data = await loginRes.json();
     sessionDoctorId = data.doctor_id;
-    navTo("list", { page: 1, pageSize: 20 });
+    navTo("dashboard");
     await render();
   });
 }
@@ -214,7 +239,7 @@ function renderChangePassword(container, { errorMsg, successMsg } = {}) {
     card.querySelector("#change-pw-form").style.display = "none";
   }
   card.querySelector("#cancel-change-pw").addEventListener("click", () => {
-    navTo("list", { page: 1, pageSize: 20 });
+    navTo("dashboard");
     render();
   });
   card.querySelector("#change-pw-form").addEventListener("submit", async (ev) => {
@@ -322,6 +347,98 @@ function convTagClass(tag) {
     case "Conversacion finalizada":   return "purple";
     case "Mal uso del bot":           return "red";
     default:                          return "blue";
+  }
+}
+
+function dashboardTagBreakdownHtml(byTag) {
+  const entries = Object.entries(byTag || {});
+  if (!entries.length) {
+    return `<p class="meta">Sin conversaciones clasificadas.</p>`;
+  }
+  return entries
+    .map(
+      ([tag, count]) => `
+        <div class="dashboard-tag-row">
+          <span class="conv-tag conv-tag-${convTagClass(tag)}">${escapeHtml(tag)}</span>
+          <span class="dashboard-tag-count">${count}</span>
+        </div>
+      `
+    )
+    .join("");
+}
+
+async function renderDashboard(container) {
+  container.innerHTML = "";
+  container.classList.remove("chat-mode");
+
+  const wrap = el(`<div class="card"><h1>Dashboard</h1><div id="dashboard-body">Cargando…</div></div>`);
+  container.appendChild(wrap);
+
+  const res = await apiFetch(`/doctors/${sessionDoctorId}/dashboard/summary`);
+  if (res.status === 401) {
+    sessionDoctorId = null;
+    location.hash = "#/login";
+    await render();
+    return;
+  }
+  const body = wrap.querySelector("#dashboard-body");
+  if (!res.ok) {
+    body.innerHTML = `<div class="error">No se pudo cargar el resumen.</div>`;
+    return;
+  }
+  const data = await res.json();
+
+  body.innerHTML = `
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-value">${data.total_conversations}</div>
+        <div class="metric-label">Conversaciones totales</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value">${data.unclassified_count}</div>
+        <div class="metric-label">Sin clasificar</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value">${data.bot_enabled_count}</div>
+        <div class="metric-label">Bot activo</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value">${data.bot_disabled_count}</div>
+        <div class="metric-label">Bot desactivado</div>
+      </div>
+    </div>
+    <h2>Por clasificación</h2>
+    <div class="dashboard-tag-list">${dashboardTagBreakdownHtml(data.by_classification_tag)}</div>
+    <h2>Conversaciones recientes</h2>
+    <div id="dashboard-recent"></div>
+  `;
+
+  const recentEl = body.querySelector("#dashboard-recent");
+  const recent = data.recent_conversations || [];
+  if (!recent.length) {
+    recentEl.innerHTML = `<p class="meta">No hay conversaciones.</p>`;
+  } else {
+    for (const c of recent) {
+      const nameHtml = c.contact_name
+        ? `<span class="contact-name">${escapeHtml(c.contact_name)}</span>`
+        : "";
+      const row = el(`
+        <div class="conversation-row">
+          <div class="conv-info">
+            ${nameHtml}
+            <strong>${escapeHtml(c.phone_number)}</strong>
+            <div class="meta">Actualizado: ${formatDate(c.updated_at)}</div>
+          </div>
+          <div class="conv-actions">
+            <button type="button" class="sm" data-chat="${c.id}">Ver conversación</button>
+          </div>
+        </div>
+      `);
+      row.querySelector("[data-chat]").addEventListener("click", () => {
+        navTo("chat", { conversationId: c.id, page: 1, pageSize: 20 });
+      });
+      recentEl.appendChild(row);
+    }
   }
 }
 
@@ -1064,7 +1181,7 @@ async function render() {
   const ok = sessionDoctorId != null ? true : await trySession();
 
   if (!ok) {
-    setTopbarAuthVisible(false);
+    setSidebarVisible(false);
     if (route.view !== "login") {
       location.hash = "#/login";
     }
@@ -1073,18 +1190,23 @@ async function render() {
   }
 
   if (route.view === "login") {
-    navTo("list", { page: 1, pageSize: route.pageSize || 20 });
+    navTo("dashboard");
     await render();
     return;
   }
 
-  setTopbarAuthVisible(true);
+  setSidebarVisible(true);
+  updateActiveNav(route.view);
 
   if (route.view === "change-password") {
     renderChangePassword(app);
     return;
   }
 
+  if (route.view === "dashboard") {
+    await renderDashboard(app, route);
+    return;
+  }
   if (route.view === "list") {
     await renderList(app, route);
     return;
@@ -1097,12 +1219,12 @@ async function render() {
     await renderFiles(app, route.conversationId, route);
     return;
   }
-  await renderList(app, route);
+  await renderDashboard(app, route);
 }
 
 function goHome() {
   if (!sessionDoctorId) return;
-  navTo("list", { page: 1, pageSize: 20 });
+  navTo("dashboard");
   render();
 }
 
@@ -1126,7 +1248,7 @@ window.addEventListener("hashchange", () => {
 });
 
 if (!location.hash || location.hash === "#") {
-  location.replace("#/?p=1&ps=20");
+  location.replace("#/");
 }
 render();
 
@@ -1151,4 +1273,48 @@ render();
       applyTheme(next);
     });
   }
+})();
+
+// Sidebar collapse (desktop)
+(function () {
+  const sidebar = document.getElementById("sidebar");
+  const btn = document.getElementById("btn-sidebar-collapse");
+  if (!sidebar || !btn) return;
+
+  function applyCollapsed(collapsed) {
+    sidebar.classList.toggle("collapsed", collapsed);
+    localStorage.setItem("coyote-portal-sidebar-collapsed", collapsed ? "1" : "0");
+  }
+
+  applyCollapsed(localStorage.getItem("coyote-portal-sidebar-collapsed") === "1");
+
+  btn.addEventListener("click", () => {
+    applyCollapsed(!sidebar.classList.contains("collapsed"));
+  });
+})();
+
+// Sidebar drawer (mobile)
+(function () {
+  const sidebar = document.getElementById("sidebar");
+  const backdrop = document.getElementById("sidebar-backdrop");
+  const toggleBtn = document.getElementById("btn-sidebar-toggle");
+  if (!sidebar || !backdrop || !toggleBtn) return;
+
+  function openMobileSidebar() {
+    sidebar.classList.add("open");
+    backdrop.classList.remove("hidden");
+  }
+
+  toggleBtn.addEventListener("click", () => {
+    if (sidebar.classList.contains("open")) {
+      closeMobileSidebar();
+    } else {
+      openMobileSidebar();
+    }
+  });
+
+  backdrop.addEventListener("click", closeMobileSidebar);
+  sidebar.querySelectorAll(".sidebar-link").forEach((link) => {
+    link.addEventListener("click", closeMobileSidebar);
+  });
 })();
