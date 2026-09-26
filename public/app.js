@@ -38,6 +38,38 @@ function el(html) {
   return t.content.firstElementChild;
 }
 
+function openModal({ title, bodyEl }) {
+  const overlay = el(`<div class="modal-overlay"></div>`);
+  const modal = el(`
+    <div class="modal">
+      <div class="modal-header">
+        <h2>${escapeHtml(title)}</h2>
+        <button type="button" class="modal-close-btn" aria-label="Cerrar">&times;</button>
+      </div>
+      <div class="modal-body"></div>
+    </div>
+  `);
+  modal.querySelector(".modal-body").appendChild(bodyEl);
+  overlay.appendChild(modal);
+
+  function close() {
+    document.removeEventListener("keydown", onKeydown);
+    overlay.remove();
+  }
+  function onKeydown(ev) {
+    if (ev.key === "Escape") close();
+  }
+
+  overlay.addEventListener("click", (ev) => {
+    if (ev.target === overlay) close();
+  });
+  modal.querySelector(".modal-close-btn").addEventListener("click", close);
+  document.addEventListener("keydown", onKeydown);
+  document.body.appendChild(overlay);
+
+  return { overlay, modal, close };
+}
+
 async function apiFetch(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (
@@ -811,7 +843,6 @@ async function renderKnowledge(container, route) {
       <div class="card-header-row">
         <button type="button" id="kb-add-btn">Agregar</button>
       </div>
-      <div id="kb-form-panel-slot"></div>
       <div class="toolbar">
         <input type="text" id="kb-search" class="search-input" placeholder="Buscar por título o contenido…" autocomplete="off" />
         <select id="kb-category-filter">
@@ -827,7 +858,6 @@ async function renderKnowledge(container, route) {
   `);
   container.appendChild(wrap);
 
-  const formSlot = wrap.querySelector("#kb-form-panel-slot");
   const tableWrap = wrap.querySelector("#kb-table-wrap");
   tableWrap.innerHTML = `<p class="meta">Cargando…</p>`;
 
@@ -849,34 +879,26 @@ async function renderKnowledge(container, route) {
     return true;
   }
 
-  function closeFormPanel() {
-    formSlot.innerHTML = "";
-  }
-
   function categoriesFrom(list) {
     return [...new Set(list.map((d) => d.category))].sort();
   }
 
-  function openFormPanel({ heading, doc }) {
-    formSlot.innerHTML = "";
-    const panel = el(`
-      <div class="knowledge-form-panel">
-        <h2>${escapeHtml(heading)}</h2>
-        <form class="kb-form">
-          <div class="kb-form-error error" style="display:none"></div>
-          ${knowledgeFormFieldsHtml(doc, categoriesFrom(docs))}
-          <div class="form-actions">
-            <button type="submit">Guardar</button>
-            <button type="button" class="btn sm secondary kb-cancel-btn">Cancelar</button>
-          </div>
-        </form>
-      </div>
+  function openKnowledgeFormModal({ heading, doc }) {
+    const body = el(`
+      <form class="kb-form">
+        <div class="kb-form-error error" style="display:none"></div>
+        ${knowledgeFormFieldsHtml(doc, categoriesFrom(docs))}
+        <div class="form-actions">
+          <button type="submit">Guardar</button>
+          <button type="button" class="btn sm secondary kb-cancel-btn">Cancelar</button>
+        </div>
+      </form>
     `);
-    formSlot.appendChild(panel);
-    panel.querySelector(".kb-cancel-btn").addEventListener("click", closeFormPanel);
-    panel.querySelector(".kb-form").addEventListener("submit", async (ev) => {
+    const { close } = openModal({ title: heading, bodyEl: body });
+    body.querySelector(".kb-cancel-btn").addEventListener("click", close);
+    body.addEventListener("submit", async (ev) => {
       ev.preventDefault();
-      const errorEl = panel.querySelector(".kb-form-error");
+      const errorEl = body.querySelector(".kb-form-error");
       errorEl.style.display = "none";
       const payload = readKnowledgeFormValues(ev.target);
       if (!payload.title || !payload.category || !payload.content) {
@@ -894,7 +916,7 @@ async function renderKnowledge(container, route) {
             body: JSON.stringify(payload),
           });
       if (res.ok) {
-        closeFormPanel();
+        close();
         await refresh();
       } else {
         errorEl.textContent = "No se pudo guardar. Intenta nuevamente.";
@@ -958,7 +980,7 @@ async function renderKnowledge(container, route) {
       const docId = parseInt(tr.dataset.kbId, 10);
       const doc = docs.find((d) => d.id === docId);
       tr.querySelector(".kb-edit-btn").addEventListener("click", () => {
-        openFormPanel({ heading: "Editar entrada", doc });
+        openKnowledgeFormModal({ heading: "Editar entrada", doc });
       });
       tr.querySelector(".kb-toggle-btn").addEventListener("click", () => toggleActive(doc));
     });
@@ -982,7 +1004,7 @@ async function renderKnowledge(container, route) {
   }
 
   wrap.querySelector("#kb-add-btn").addEventListener("click", () => {
-    openFormPanel({ heading: "Agregar entrada", doc: null });
+    openKnowledgeFormModal({ heading: "Agregar entrada", doc: null });
   });
   wrap.querySelector("#kb-search").addEventListener("input", applyFiltersAndRender);
   wrap.querySelector("#kb-category-filter").addEventListener("change", applyFiltersAndRender);

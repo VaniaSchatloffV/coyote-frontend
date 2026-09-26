@@ -1228,23 +1228,71 @@ th {
   white-space: nowrap;
 }
 
-.knowledge-form-panel {
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  padding: 1.25rem 1.5rem;
-  margin-bottom: 1.25rem;
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  z-index: 300;
 }
 
-.knowledge-form-panel textarea,
-.knowledge-form-panel select,
-.knowledge-form-panel input[type="text"] {
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+  width: 100%;
+  max-width: 560px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.25rem 1.5rem 0;
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.modal-close-btn {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: var(--muted) !important;
+  font-size: 1.4rem !important;
+  line-height: 1;
+  padding: 0.2rem 0.5rem !important;
+  cursor: pointer;
+}
+
+.modal-close-btn:hover {
+  color: var(--text) !important;
+  transform: none !important;
+}
+
+.modal-body {
+  padding: 1.25rem 1.5rem 1.5rem;
+}
+
+.modal-body textarea,
+.modal-body select,
+.modal-body input[type="text"] {
   width: 100%;
   max-width: 100%;
   padding: 0.6rem 0.9rem;
   border-radius: var(--radius-input);
   border: 1.5px solid var(--border);
-  background: var(--surface);
+  background: var(--surface2);
   color: var(--text);
   font-size: 0.95rem;
   font-family: "Inter", system-ui, sans-serif;
@@ -1255,9 +1303,9 @@ th {
   resize: vertical;
 }
 
-.knowledge-form-panel textarea:focus,
-.knowledge-form-panel select:focus,
-.knowledge-form-panel input[type="text"]:focus {
+.modal-body textarea:focus,
+.modal-body select:focus,
+.modal-body input[type="text"]:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
