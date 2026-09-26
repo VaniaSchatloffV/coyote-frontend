@@ -96,6 +96,9 @@ function parseHash() {
   if (parts[0] === "change-password") {
     return { view: "change-password", page: 1, pageSize: 20 };
   }
+  if (parts[0] === "knowledge") {
+    return { view: "knowledge", page: 1, pageSize: 20 };
+  }
   // Empty path (#/) and any unrecognized path resolve to the dashboard (new home).
   return { view: "dashboard", page, pageSize };
 }
@@ -119,6 +122,8 @@ function navTo(view, opts = {}) {
     location.hash = `#/conversations/${opts.conversationId}/chat?${q}`;
   } else if (view === "files" && opts.conversationId != null) {
     location.hash = `#/conversations/${opts.conversationId}/files?${q}`;
+  } else if (view === "knowledge") {
+    location.hash = `#/knowledge`;
   } else {
     location.hash = `#/`;
   }
@@ -143,6 +148,8 @@ function updateActiveNav(view) {
   const activeRoute =
     view === "list" || view === "chat" || view === "files"
       ? "conversations"
+      : view === "knowledge"
+      ? "knowledge"
       : "dashboard";
   document.querySelectorAll(".sidebar-link").forEach((link) => {
     link.classList.toggle("active", link.dataset.route === activeRoute);
@@ -732,6 +739,258 @@ async function renderList(container, route) {
   await loadData(page);
 }
 
+// ── Base de conocimiento ────────────────────────────────────────────────────
+
+function knowledgeTruncate(s, max) {
+  if (!s) return "";
+  return s.length > max ? s.slice(0, max).trim() + "…" : s;
+}
+
+function knowledgeFormFieldsHtml(doc, categories) {
+  const d = doc || {};
+  const datalistOptions = (categories || [])
+    .map((c) => `<option value="${escapeAttr(c)}"></option>`)
+    .join("");
+  return `
+    <label for="kb-title">Título</label>
+    <input id="kb-title" name="title" type="text" value="${escapeAttr(d.title || "")}" required />
+
+    <label for="kb-category">Categoría</label>
+    <input id="kb-category" name="category" type="text" list="kb-category-suggestions" value="${escapeAttr(d.category || "")}" required />
+    <datalist id="kb-category-suggestions">${datalistOptions}</datalist>
+
+    <label for="kb-prompt">Pregunta de ejemplo (opcional)</label>
+    <p class="meta">Una pregunta que un paciente podría hacer sobre este tema.</p>
+    <textarea id="kb-prompt" name="prompt" rows="2">${escapeHtml(d.prompt || "")}</textarea>
+
+    <label for="kb-content">Contenido</label>
+    <textarea id="kb-content" name="content" rows="6" required>${escapeHtml(d.content || "")}</textarea>
+  `;
+}
+
+function readKnowledgeFormValues(formEl) {
+  const fd = new FormData(formEl);
+  const value = (k) => {
+    const v = (fd.get(k) || "").toString().trim();
+    return v === "" ? null : v;
+  };
+  return {
+    title: (fd.get("title") || "").toString().trim(),
+    category: (fd.get("category") || "").toString().trim(),
+    prompt: value("prompt"),
+    content: (fd.get("content") || "").toString().trim(),
+  };
+}
+
+function knowledgeRowHtml(doc) {
+  return `
+    <tr data-kb-id="${doc.id}">
+      <td>${escapeHtml(doc.title)}</td>
+      <td>${escapeHtml(doc.category)}</td>
+      <td class="cell-preview">${escapeHtml(knowledgeTruncate(doc.content, 80))}</td>
+      <td class="table-actions">
+        <button type="button" class="btn sm secondary kb-edit-btn">Editar</button>
+        <button type="button" class="btn sm secondary kb-toggle-btn">${doc.is_active ? "Eliminar" : "Restaurar"}</button>
+      </td>
+    </tr>
+  `;
+}
+
+async function renderKnowledge(container, route) {
+  container.innerHTML = "";
+  container.classList.remove("chat-mode");
+
+  const wrap = el(`
+    <div class="card">
+      <h1>Base de conocimiento</h1>
+      <p class="meta">
+        Esta información es la que usa el asistente virtual para responder automáticamente a tus
+        pacientes. Consejos: escribe una idea por entrada, usa lenguaje simple y claro, y mantén
+        cada entrada breve. Los cambios quedan listos para usarse poco después de guardarlos.
+      </p>
+      <div class="card-header-row">
+        <button type="button" id="kb-add-btn">Agregar</button>
+      </div>
+      <div id="kb-form-panel-slot"></div>
+      <div class="toolbar">
+        <input type="text" id="kb-search" class="search-input" placeholder="Buscar por título o contenido…" autocomplete="off" />
+        <select id="kb-category-filter">
+          <option value="">Todas las categorías</option>
+        </select>
+        <label class="kb-toggle-deleted">
+          <input type="checkbox" id="kb-show-deleted" />
+          Mostrar eliminados
+        </label>
+      </div>
+      <div id="kb-table-wrap"></div>
+    </div>
+  `);
+  container.appendChild(wrap);
+
+  const formSlot = wrap.querySelector("#kb-form-panel-slot");
+  const tableWrap = wrap.querySelector("#kb-table-wrap");
+  tableWrap.innerHTML = `<p class="meta">Cargando…</p>`;
+
+  let docs = [];
+
+  async function loadDocs() {
+    const res = await apiFetch(`/doctors/${sessionDoctorId}/rag?include_inactive=true&limit=100`);
+    if (res.status === 401) {
+      sessionDoctorId = null;
+      location.hash = "#/login";
+      await render();
+      return false;
+    }
+    if (!res.ok) {
+      tableWrap.innerHTML = `<div class="error">No se pudo cargar la lista.</div>`;
+      return false;
+    }
+    docs = await res.json();
+    return true;
+  }
+
+  function closeFormPanel() {
+    formSlot.innerHTML = "";
+  }
+
+  function categoriesFrom(list) {
+    return [...new Set(list.map((d) => d.category))].sort();
+  }
+
+  function openFormPanel({ heading, doc }) {
+    formSlot.innerHTML = "";
+    const panel = el(`
+      <div class="knowledge-form-panel">
+        <h2>${escapeHtml(heading)}</h2>
+        <form class="kb-form">
+          <div class="kb-form-error error" style="display:none"></div>
+          ${knowledgeFormFieldsHtml(doc, categoriesFrom(docs))}
+          <div class="form-actions">
+            <button type="submit">Guardar</button>
+            <button type="button" class="btn sm secondary kb-cancel-btn">Cancelar</button>
+          </div>
+        </form>
+      </div>
+    `);
+    formSlot.appendChild(panel);
+    panel.querySelector(".kb-cancel-btn").addEventListener("click", closeFormPanel);
+    panel.querySelector(".kb-form").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const errorEl = panel.querySelector(".kb-form-error");
+      errorEl.style.display = "none";
+      const payload = readKnowledgeFormValues(ev.target);
+      if (!payload.title || !payload.category || !payload.content) {
+        errorEl.textContent = "Título, categoría y contenido son obligatorios.";
+        errorEl.style.display = "block";
+        return;
+      }
+      const res = doc
+        ? await apiFetch(`/doctors/${sessionDoctorId}/rag/${doc.id}`, {
+            method: "PUT",
+            body: JSON.stringify(payload),
+          })
+        : await apiFetch(`/doctors/${sessionDoctorId}/rag`, {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+      if (res.ok) {
+        closeFormPanel();
+        await refresh();
+      } else {
+        errorEl.textContent = "No se pudo guardar. Intenta nuevamente.";
+        errorEl.style.display = "block";
+      }
+    });
+  }
+
+  async function toggleActive(doc) {
+    const activating = !doc.is_active;
+    const confirmMsg = activating
+      ? `¿Restaurar "${doc.title}"? Volverá a usarse para responder a tus pacientes.`
+      : `¿Eliminar "${doc.title}"? Dejará de usarse para responder a tus pacientes.`;
+    if (!window.confirm(confirmMsg)) return;
+    const res = activating
+      ? await apiFetch(`/doctors/${sessionDoctorId}/rag/${doc.id}`, {
+          method: "PUT",
+          body: JSON.stringify({ is_active: true }),
+        })
+      : await apiFetch(`/doctors/${sessionDoctorId}/rag/${doc.id}`, { method: "DELETE" });
+    if (res.ok) {
+      await refresh();
+    } else {
+      window.alert("No se pudo actualizar el estado de la entrada.");
+    }
+  }
+
+  function applyFiltersAndRender() {
+    const search = wrap.querySelector("#kb-search").value.trim().toLowerCase();
+    const category = wrap.querySelector("#kb-category-filter").value;
+    const showDeleted = wrap.querySelector("#kb-show-deleted").checked;
+
+    let filtered = showDeleted ? docs : docs.filter((d) => d.is_active);
+    if (category) filtered = filtered.filter((d) => d.category === category);
+    if (search) {
+      filtered = filtered.filter((d) =>
+        [d.title, d.content, d.prompt].filter(Boolean).some((v) => v.toLowerCase().includes(search))
+      );
+    }
+
+    if (!filtered.length) {
+      tableWrap.innerHTML = `<p class="meta">No hay entradas que coincidan.</p>`;
+      return;
+    }
+
+    const table = el(`
+      <table>
+        <thead>
+          <tr><th>Título</th><th>Categoría</th><th>Contenido</th><th></th></tr>
+        </thead>
+        <tbody>${filtered.map(knowledgeRowHtml).join("")}</tbody>
+      </table>
+    `);
+    tableWrap.innerHTML = "";
+    const scroller = document.createElement("div");
+    scroller.className = "table-scroll";
+    scroller.appendChild(table);
+    tableWrap.appendChild(scroller);
+
+    tableWrap.querySelectorAll("tr[data-kb-id]").forEach((tr) => {
+      const docId = parseInt(tr.dataset.kbId, 10);
+      const doc = docs.find((d) => d.id === docId);
+      tr.querySelector(".kb-edit-btn").addEventListener("click", () => {
+        openFormPanel({ heading: "Editar entrada", doc });
+      });
+      tr.querySelector(".kb-toggle-btn").addEventListener("click", () => toggleActive(doc));
+    });
+  }
+
+  function refreshCategoryOptions() {
+    const sel = wrap.querySelector("#kb-category-filter");
+    const current = sel.value;
+    sel.innerHTML = `<option value="">Todas las categorías</option>`;
+    categoriesFrom(docs).forEach((c) => {
+      sel.appendChild(el(`<option value="${escapeAttr(c)}">${escapeHtml(c)}</option>`));
+    });
+    sel.value = current;
+  }
+
+  async function refresh() {
+    const ok = await loadDocs();
+    if (!ok) return;
+    refreshCategoryOptions();
+    applyFiltersAndRender();
+  }
+
+  wrap.querySelector("#kb-add-btn").addEventListener("click", () => {
+    openFormPanel({ heading: "Agregar entrada", doc: null });
+  });
+  wrap.querySelector("#kb-search").addEventListener("input", applyFiltersAndRender);
+  wrap.querySelector("#kb-category-filter").addEventListener("change", applyFiltersAndRender);
+  wrap.querySelector("#kb-show-deleted").addEventListener("change", applyFiltersAndRender);
+
+  await refresh();
+}
+
 function buildMessageBubble(m) {
   const isUser = m.role === "user";
   const isSystem = m.role === "system";
@@ -1217,6 +1476,10 @@ async function render() {
   }
   if (route.view === "files" && route.conversationId) {
     await renderFiles(app, route.conversationId, route);
+    return;
+  }
+  if (route.view === "knowledge") {
+    await renderKnowledge(app, route);
     return;
   }
   await renderDashboard(app, route);
