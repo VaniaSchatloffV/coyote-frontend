@@ -751,6 +751,7 @@ function buildMessageBubble(m) {
     const div = document.createElement("div");
     div.className = "bubble-system";
     div.dataset.msgId = String(m.id);
+    if (m.created_at) div.dataset.ts = m.created_at;
     div.textContent = m.content;
     return div;
   }
@@ -773,6 +774,7 @@ function buildMessageBubble(m) {
   const row = document.createElement("div");
   row.className = `bubble-row ${isUser ? "bubble-user" : "bubble-assistant"}`;
   row.dataset.msgId = String(m.id);
+  if (m.created_at) row.dataset.ts = m.created_at;
 
   const bubble = document.createElement("div");
   bubble.className = "bubble";
@@ -783,6 +785,63 @@ function buildMessageBubble(m) {
 
   row.appendChild(bubble);
   return row;
+}
+
+/** Day bucket key (local) used to group messages. */
+function chatDayKey(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+/** WhatsApp-style human label for a day: "Hoy", "Ayer", weekday, or full date. */
+function chatDayLabel(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+  const diffDays = Math.round(
+    (startOf(new Date()) - startOf(d)) / 86400000
+  );
+  if (diffDays === 0) return "Hoy";
+  if (diffDays === 1) return "Ayer";
+  if (diffDays > 1 && diffDays < 7) {
+    const wd = d.toLocaleDateString("es", { weekday: "long" });
+    return wd.charAt(0).toUpperCase() + wd.slice(1);
+  }
+  return d.toLocaleDateString("es", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+}
+
+/** Inline date separator pill that stays within the chat flow. */
+function buildDateSeparator(iso) {
+  const sep = document.createElement("div");
+  sep.className = "chat-date-sep";
+  const pill = document.createElement("span");
+  pill.className = "chat-date-pill";
+  pill.textContent = chatDayLabel(iso);
+  sep.appendChild(pill);
+  return sep;
+}
+
+/**
+ * Recompute inline date separators: one pill before the first message of
+ * each day, in chronological (DOM) order. Idempotent — safe to call after
+ * any mutation (initial render, prepend older, append newer).
+ */
+function rebuildDateSeparators(messagesArea) {
+  messagesArea.querySelectorAll(".chat-date-sep").forEach((n) => n.remove());
+  let prevKey = null;
+  for (const node of messagesArea.querySelectorAll("[data-ts]")) {
+    const key = chatDayKey(node.dataset.ts);
+    if (!key) continue;
+    if (key !== prevKey) {
+      messagesArea.insertBefore(buildDateSeparator(node.dataset.ts), node);
+      prevKey = key;
+    }
+  }
 }
 
 async function renderChat(container, conversationId, route) {
@@ -850,9 +909,12 @@ async function renderChat(container, conversationId, route) {
         </button>
       </div>
     </div>
-    <div class="chat-messages" id="chat-messages">
-      <div class="chat-load-more-wrapper" id="chat-load-more-wrapper" ${totalMessages <= olderOffset ? 'style="display:none"' : ""}>
-        <button type="button" class="secondary sm" id="chat-load-more">Cargar mensajes anteriores</button>
+    <div class="chat-messages-viewport">
+      <div class="chat-date-float" id="chat-date-float" aria-hidden="true"></div>
+      <div class="chat-messages" id="chat-messages">
+        <div class="chat-load-more-wrapper" id="chat-load-more-wrapper" ${totalMessages <= olderOffset ? 'style="display:none"' : ""}>
+          <button type="button" class="secondary sm" id="chat-load-more">Cargar mensajes anteriores</button>
+        </div>
       </div>
     </div>
     <div class="chat-input-bar">
@@ -872,6 +934,7 @@ async function renderChat(container, conversationId, route) {
   container.appendChild(wrapper);
 
   const messagesArea = wrapper.querySelector("#chat-messages");
+  const dateFloat = wrapper.querySelector("#chat-date-float");
   const loadMoreWrapper = wrapper.querySelector("#chat-load-more-wrapper");
   const botToggleBtn = wrapper.querySelector("#chat-bot-toggle");
   const botStatusEl = wrapper.querySelector("#chat-bot-status");
@@ -910,8 +973,37 @@ async function renderChat(container, conversationId, route) {
     }
   }
 
+  // Floating WhatsApp-style date pill: reflects the day of the topmost
+  // visible message while scrolling, then fades out once scrolling stops.
+  let dateFloatHideTimer = null;
+  function updateFloatingDate() {
+    const nodes = messagesArea.querySelectorAll("[data-ts]");
+    if (!nodes.length) return;
+    const top = messagesArea.scrollTop;
+    let currentTs = null;
+    for (const node of nodes) {
+      if (node.offsetTop + node.offsetHeight - 6 > top) {
+        currentTs = node.dataset.ts;
+        break;
+      }
+    }
+    if (!currentTs) currentTs = nodes[nodes.length - 1].dataset.ts;
+    dateFloat.textContent = chatDayLabel(currentTs);
+  }
+  function showFloatingDate() {
+    updateFloatingDate();
+    dateFloat.classList.add("visible");
+    if (dateFloatHideTimer) clearTimeout(dateFloatHideTimer);
+    dateFloatHideTimer = setTimeout(
+      () => dateFloat.classList.remove("visible"),
+      1400
+    );
+  }
+  messagesArea.addEventListener("scroll", showFloatingDate, { passive: true });
+
   // Render initial messages
   for (const m of initialMessages) appendBubble(m);
+  rebuildDateSeparators(messagesArea);
   messagesArea.scrollTop = messagesArea.scrollHeight;
 
   // Navigation
@@ -971,6 +1063,7 @@ async function renderChat(container, conversationId, route) {
     if (!res.ok) return;
     const newMsg = await res.json();
     appendBubble(newMsg);
+    rebuildDateSeparators(messagesArea);
     textarea.value = "";
     textarea.style.height = "auto";
     messagesArea.scrollTop = messagesArea.scrollHeight;
@@ -996,6 +1089,7 @@ async function renderChat(container, conversationId, route) {
 
     const prevScrollHeight = messagesArea.scrollHeight;
     prependBubbles(older);
+    rebuildDateSeparators(messagesArea);
     messagesArea.scrollTop =
       messagesArea.scrollHeight - prevScrollHeight + messagesArea.scrollTop;
 
@@ -1030,6 +1124,7 @@ async function renderChat(container, conversationId, route) {
           messagesArea.clientHeight <
         80;
       for (const m of newItems) appendBubble(m);
+      rebuildDateSeparators(messagesArea);
       if (atBottom) messagesArea.scrollTop = messagesArea.scrollHeight;
     } catch {
       // ignore transient poll errors
