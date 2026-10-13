@@ -131,6 +131,9 @@ function parseHash() {
   if (parts[0] === "knowledge") {
     return { view: "knowledge", page: 1, pageSize: 20 };
   }
+  if (parts[0] === "prompt") {
+    return { view: "prompt", page: 1, pageSize: 20 };
+  }
   // Empty path (#/) and any unrecognized path resolve to the dashboard (new home).
   return { view: "dashboard", page, pageSize };
 }
@@ -156,6 +159,8 @@ function navTo(view, opts = {}) {
     location.hash = `#/conversations/${opts.conversationId}/files?${q}`;
   } else if (view === "knowledge") {
     location.hash = `#/knowledge`;
+  } else if (view === "prompt") {
+    location.hash = `#/prompt`;
   } else {
     location.hash = `#/`;
   }
@@ -182,6 +187,8 @@ function updateActiveNav(view) {
       ? "conversations"
       : view === "knowledge"
       ? "knowledge"
+      : view === "prompt"
+      ? "prompt"
       : "dashboard";
   document.querySelectorAll(".sidebar-link").forEach((link) => {
     link.classList.toggle("active", link.dataset.route === activeRoute);
@@ -1013,6 +1020,184 @@ async function renderKnowledge(container, route) {
   await refresh();
 }
 
+// ── Prompt del asistente ────────────────────────────────────────────────────
+
+async function renderSystemPrompt(container) {
+  container.innerHTML = "";
+  container.classList.remove("chat-mode");
+
+  const wrap = el(`
+    <div class="card">
+      <h1>Prompt del asistente</h1>
+      <p class="meta">
+        Aquí defines cómo se comporta el asistente virtual que responde a tus pacientes por WhatsApp.
+      </p>
+
+      <details class="prompt-help" open>
+        <summary>¿Qué es y cómo funciona?</summary>
+        <div class="prompt-help-body">
+          <h3>¿Qué es el prompt?</h3>
+          <p>
+            Es un texto con las instrucciones que sigue tu asistente: quién es, cómo habla, qué puede
+            y qué no puede responder. Piensa en él como la "inducción" que le darías a una persona
+            nueva que atenderá a tus pacientes.
+          </p>
+          <h3>¿Cómo funciona?</h3>
+          <ul>
+            <li>En cada mensaje de un paciente, el asistente lee este prompt junto con tu
+              <a href="#/knowledge">Base de conocimiento</a> y el historial de la conversación.</li>
+            <li>Los cambios se aplican de inmediato: el siguiente mensaje que llegue ya usará el
+              prompt nuevo.</li>
+            <li>Si no has personalizado nada, se usa un prompt base preparado para tu especialidad.</li>
+          </ul>
+          <h3>Lo que se agrega automáticamente</h3>
+          <p>No necesitas escribir esto; el sistema lo incluye siempre:</p>
+          <ul>
+            <li>La información de tu Base de conocimiento.</li>
+            <li>Los datos de contacto de tu asistente humano, para derivar consultas que no puede resolver.</li>
+            <li>El formato de WhatsApp (sin Markdown) y el idioma: español de Chile.</li>
+          </ul>
+          <h3>Recomendaciones</h3>
+          <ul>
+            <li>Usa frases claras y breves; una instrucción por línea.</li>
+            <li>Indica el tono (cercano, formal, empático) y cómo debe presentarse.</li>
+            <li>Define qué hacer cuando no sabe la respuesta (por ejemplo, ofrecer contactar a tu asistente).</li>
+            <li>Indica lo que nunca debe hacer, como dar diagnósticos o indicar medicamentos.</li>
+            <li>No pongas aquí datos que cambian (precios, horarios, direcciones): van en la Base de conocimiento.</li>
+            <li>Haz cambios pequeños y prueba el resultado enviando un mensaje de prueba.</li>
+          </ul>
+          <p class="meta">
+            Un prompt mal escrito puede alterar las respuestas del asistente. Si algo no sale como
+            esperabas, usa "Restaurar prompt por defecto".
+          </p>
+        </div>
+      </details>
+
+      <div id="sp-message" class="error" style="display:none"></div>
+      <div id="sp-body"><p class="meta">Cargando…</p></div>
+    </div>
+  `);
+  container.appendChild(wrap);
+
+  const body = wrap.querySelector("#sp-body");
+  const msg = wrap.querySelector("#sp-message");
+
+  function showMessage(text, kind) {
+    msg.textContent = text;
+    msg.className = kind;
+    msg.style.display = text ? "block" : "none";
+  }
+
+  const res = await apiFetch(`/doctors/${sessionDoctorId}/system-prompt`);
+  if (res.status === 401) {
+    sessionDoctorId = null;
+    location.hash = "#/login";
+    await render();
+    return;
+  }
+  if (!res.ok) {
+    body.innerHTML = "";
+    showMessage("No se pudo cargar el prompt. Intenta nuevamente.", "error");
+    return;
+  }
+  let data = await res.json();
+
+  body.innerHTML = `
+    <label for="sp-textarea">Prompt de sistema</label>
+    <p class="meta" id="sp-status"></p>
+    <textarea id="sp-textarea" rows="18" maxlength="${data.max_length}" spellcheck="true"></textarea>
+    <div class="prompt-counter meta" id="sp-counter"></div>
+    <div class="form-actions">
+      <button type="button" id="sp-save">Guardar cambios</button>
+      <button type="button" id="sp-discard" class="btn sm secondary">Descartar cambios</button>
+      <button type="button" id="sp-reset" class="btn sm secondary">Restaurar prompt por defecto</button>
+    </div>
+  `;
+  const ta = body.querySelector("#sp-textarea");
+  const statusEl = body.querySelector("#sp-status");
+  const counter = body.querySelector("#sp-counter");
+  const saveBtn = body.querySelector("#sp-save");
+  const discardBtn = body.querySelector("#sp-discard");
+  const resetBtn = body.querySelector("#sp-reset");
+
+  // Texto base contra el que se detectan cambios sin guardar.
+  let baseline = "";
+
+  function currentText() {
+    return data.system_prompt || data.default_system_prompt;
+  }
+
+  function updateUi() {
+    const dirty = ta.value !== baseline;
+    counter.textContent = `${ta.value.length} / ${data.max_length} caracteres`;
+    saveBtn.disabled = !dirty || !ta.value.trim();
+    discardBtn.disabled = !dirty;
+    resetBtn.disabled = !data.is_custom;
+    statusEl.textContent = dirty
+      ? "Tienes cambios sin guardar."
+      : data.is_custom
+      ? "Estás usando un prompt personalizado."
+      : "Estás usando el prompt por defecto. Puedes editarlo y guardarlo para personalizarlo.";
+  }
+
+  function load(next) {
+    data = next;
+    baseline = currentText();
+    ta.value = baseline;
+    updateUi();
+  }
+
+  async function save(value, okText) {
+    showMessage("", "error");
+    saveBtn.disabled = true;
+    resetBtn.disabled = true;
+    const r = await apiFetch(`/doctors/${sessionDoctorId}/system-prompt`, {
+      method: "PUT",
+      body: JSON.stringify({ system_prompt: value }),
+    });
+    if (r.status === 401) {
+      sessionDoctorId = null;
+      location.hash = "#/login";
+      await render();
+      return;
+    }
+    if (!r.ok) {
+      updateUi();
+      showMessage("No se pudieron guardar los cambios. Intenta nuevamente.", "error");
+      return;
+    }
+    load(await r.json());
+    showMessage(okText, "success");
+  }
+
+  ta.addEventListener("input", () => {
+    showMessage("", "error");
+    updateUi();
+  });
+  saveBtn.addEventListener("click", () => {
+    const text = ta.value.trim();
+    // Si queda igual al prompt base, se guarda como "por defecto" (null).
+    const isDefault = text === data.default_system_prompt.trim();
+    save(isDefault ? null : text, "Cambios guardados.");
+  });
+  discardBtn.addEventListener("click", () => {
+    ta.value = baseline;
+    showMessage("", "error");
+    updateUi();
+  });
+  resetBtn.addEventListener("click", () => {
+    if (
+      !window.confirm(
+        "¿Restaurar el prompt por defecto? Se perderá tu prompt personalizado y el asistente volverá a usar el prompt base."
+      )
+    )
+      return;
+    save(null, "Se restauró el prompt por defecto.");
+  });
+
+  load(data);
+}
+
 function buildMessageBubble(m) {
   const isUser = m.role === "user";
   const isSystem = m.role === "system";
@@ -1502,6 +1687,10 @@ async function render() {
   }
   if (route.view === "knowledge") {
     await renderKnowledge(app, route);
+    return;
+  }
+  if (route.view === "prompt") {
+    await renderSystemPrompt(app, route);
     return;
   }
   await renderDashboard(app, route);

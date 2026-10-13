@@ -1498,3 +1498,62 @@ th {
     padding: 0.5rem 0.75rem 0.6rem;
   }
 }
+
+/* ── Prompt del asistente ─────────────── */
+.prompt-help {
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-input);
+  background: var(--surface2);
+  padding: 0.75rem 1rem;
+  margin: 1rem 0 1.25rem;
+}
+
+.prompt-help summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.prompt-help-body {
+  margin-top: 0.75rem;
+  font-size: 0.92rem;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.prompt-help-body h3 {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.35rem;
+}
+
+.prompt-help-body ul {
+  margin: 0.25rem 0 0.5rem;
+  padding-left: 1.25rem;
+}
+
+#sp-textarea {
+  width: 100%;
+  max-width: 100%;
+  padding: 0.7rem 0.9rem;
+  border-radius: var(--radius-input);
+  border: 1.5px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.92rem;
+  font-family: "Inter", system-ui, sans-serif;
+  line-height: 1.5;
+  outline: none;
+  resize: vertical;
+  display: block;
+  box-sizing: border-box;
+}
+
+#sp-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.prompt-counter {
+  text-align: right;
+  margin: 0.35rem 0 1rem;
+}
