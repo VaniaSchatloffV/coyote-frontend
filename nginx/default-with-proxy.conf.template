@@ -11,6 +11,9 @@ server {
     }
 
     location / {
+        # Revalidar siempre (ETag): evita que el navegador use app.js/styles.css
+        # viejos después de un deploy.
+        add_header Cache-Control "no-cache";
         try_files $uri $uri/ /index.html;
     }
 

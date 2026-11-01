@@ -14,7 +14,11 @@ let sessionDoctorId = null;
 let chatPollInterval = null;
 let listSearchQuery = "";
 let listSearchDebounce = null;
-let listTagFilter = new Set();
+// "Estado conversación" (etiquetas IA): selección única. "" = Todos, "__none__" = Sin clasificar.
+let listStateFilter = "";
+// "Clasificación contacto": ids que el contacto debe tener todos, o "Sin clasificar contacto" (excluyente).
+let listContactFilter = new Set();
+let listContactNone = false;
 let lastTagAt = null;
 let tagTimerInterval = null;
 
@@ -134,6 +138,9 @@ function parseHash() {
   if (parts[0] === "prompt") {
     return { view: "prompt", page: 1, pageSize: 20 };
   }
+  if (parts[0] === "classifications") {
+    return { view: "classifications", page: 1, pageSize: 20 };
+  }
   // Empty path (#/) and any unrecognized path resolve to the dashboard (new home).
   return { view: "dashboard", page, pageSize };
 }
@@ -161,6 +168,8 @@ function navTo(view, opts = {}) {
     location.hash = `#/knowledge`;
   } else if (view === "prompt") {
     location.hash = `#/prompt`;
+  } else if (view === "classifications") {
+    location.hash = `#/classifications`;
   } else {
     location.hash = `#/`;
   }
@@ -189,9 +198,35 @@ function updateActiveNav(view) {
       ? "knowledge"
       : view === "prompt"
       ? "prompt"
+      : view === "classifications"
+      ? "classifications"
       : "dashboard";
   document.querySelectorAll(".sidebar-link").forEach((link) => {
     link.classList.toggle("active", link.dataset.route === activeRoute);
+  });
+  refreshSidebarGroupHighlight();
+}
+
+// ── Grupos del sidebar ──────────────────────────────────────────────────────
+// Parten cerrados (no se persiste su estado) y se cierran al colapsar el sidebar.
+
+function setSidebarGroupOpen(group, open) {
+  group.classList.toggle("open", open);
+  const btn = group.querySelector(".sidebar-group-btn");
+  if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+  refreshSidebarGroupHighlight();
+}
+
+function closeAllSidebarGroups() {
+  document.querySelectorAll(".sidebar-group").forEach((g) => setSidebarGroupOpen(g, false));
+}
+
+/** Un grupo cerrado que contiene la página actual se resalta. */
+function refreshSidebarGroupHighlight() {
+  document.querySelectorAll(".sidebar-group").forEach((group) => {
+    const hasActive = !!group.querySelector(".sidebar-link.active");
+    const btn = group.querySelector(".sidebar-group-btn");
+    if (btn) btn.classList.toggle("active", hasActive && !group.classList.contains("open"));
   });
 }
 
@@ -396,6 +431,199 @@ function convTagClass(tag) {
   }
 }
 
+// ── Clasificaciones de contacto (helpers compartidos) ──────────────────────
+
+const CONTACT_PRESET_COLORS = [
+  { hex: "#3b82f6", name: "Azul" },
+  { hex: "#22c55e", name: "Verde" },
+  { hex: "#ef4444", name: "Rojo" },
+  { hex: "#f97316", name: "Naranja" },
+  { hex: "#8b5cf6", name: "Morado" },
+  { hex: "#14b8a6", name: "Turquesa" },
+  { hex: "#ec4899", name: "Rosado" },
+  { hex: "#64748b", name: "Gris" },
+];
+const CONTACT_NAME_MAX = 32;
+const CONTACT_DESCRIPTION_MAX = 250;
+const DOCTOR_CONTACT_NAME_MAX = 200;
+
+/** Solo colores #RRGGBB llegan a un atributo style; cualquier otro valor cae a gris. */
+function safeHexColor(color) {
+  return typeof color === "string" && /^#[0-9a-fA-F]{6}$/.test(color)
+    ? color.toLowerCase()
+    : "#64748b";
+}
+
+/** Texto negro o blanco según la luminancia del fondo (se lee igual en tema claro y oscuro). */
+function badgeTextColor(hex) {
+  const c = safeHexColor(hex);
+  const channel = (i) => {
+    const v = parseInt(c.slice(i, i + 2), 16) / 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  };
+  const luminance = 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+  return luminance > 0.179 ? "#000000" : "#ffffff";
+}
+
+function contactBadgeHtml(cc) {
+  const bg = safeHexColor(cc.color);
+  return `<span class="contact-badge" style="background:${bg};color:${badgeTextColor(bg)}">${escapeHtml(cc.name)}</span>`;
+}
+
+function contactBadgesHtml(list) {
+  if (!list || !list.length) {
+    return `<span class="contact-badge contact-badge-none">Sin clasificar contacto</span>`;
+  }
+  return list.map(contactBadgeHtml).join("");
+}
+
+/** Nombre del doctor destacado y el de WhatsApp en gris (si hay ambos). */
+function contactNamesHtml(c) {
+  if (c.doctor_contact_name) {
+    const wa = c.contact_name
+      ? ` <span class="contact-name-wa">(WhatsApp: ${escapeHtml(c.contact_name)})</span>`
+      : "";
+    return `<span class="contact-name">${escapeHtml(c.doctor_contact_name)}</span>${wa}`;
+  }
+  return c.contact_name ? `<span class="contact-name">${escapeHtml(c.contact_name)}</span>` : "";
+}
+
+function lastMessageText(c) {
+  return `Último mensaje: ${formatDate(c.last_message_at || c.created_at)}`;
+}
+
+async function apiErrorDetail(res, fallback) {
+  try {
+    const err = await res.json();
+    if (err.detail) {
+      return Array.isArray(err.detail)
+        ? err.detail.map((d) => (d.msg || String(d)).replace(/^Value error, /, "")).join(" ")
+        : String(err.detail);
+    }
+  } catch {
+    /* ignore */
+  }
+  return fallback;
+}
+
+/** Lista alfabética de clasificaciones del doctor, o null si falla (401 redirige al login). */
+async function fetchContactClassifications() {
+  const res = await apiFetch(`/doctors/${sessionDoctorId}/contact-classifications`);
+  if (res.status === 401) {
+    sessionDoctorId = null;
+    location.hash = "#/login";
+    await render();
+    return null;
+  }
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/**
+ * Modal "Clasificar" (listado y chat): clasificaciones del contacto + nombre puesto por el doctor.
+ * onSaved recibe la conversación actualizada.
+ */
+function openClassifyModal(conv, classifications, onSaved) {
+  const assigned = new Set((conv.contact_classifications || []).map((cc) => cc.id));
+  const optionsHtml = classifications.length
+    ? classifications
+        .map(
+          (cc) => `
+            <label class="classify-option">
+              <input type="checkbox" value="${cc.id}" ${assigned.has(cc.id) ? "checked" : ""} />
+              ${contactBadgeHtml(cc)}
+            </label>
+          `
+        )
+        .join("")
+    : `<p class="meta">Aún no tienes clasificaciones. Créalas en
+         <a href="#/classifications" class="classify-go-config">Configuración conversaciones → Clasificaciones</a>.</p>`;
+  const waHint = conv.contact_name
+    ? `Nombre en WhatsApp: ${escapeHtml(conv.contact_name)}`
+    : "El contacto no tiene nombre en WhatsApp.";
+
+  const body = el(`
+    <form class="classify-form">
+      <div class="classify-form-error error" style="display:none"></div>
+      <p class="meta">${escapeHtml(conv.phone_number)}</p>
+
+      <label for="classify-contact-name">Nombre del contacto</label>
+      <p class="meta">${waHint}</p>
+      <div class="classify-name-row">
+        <input id="classify-contact-name" type="text" maxlength="${DOCTOR_CONTACT_NAME_MAX}"
+          value="${escapeAttr(conv.doctor_contact_name || "")}" placeholder="Nombre propio (opcional)" autocomplete="off" />
+        <button type="button" class="secondary sm classify-clear-name">Borrar nombre</button>
+      </div>
+
+      <label>Clasificación contacto</label>
+      <div class="classify-options">${optionsHtml}</div>
+
+      <div class="form-actions">
+        <button type="submit">Guardar</button>
+        <button type="button" class="btn sm secondary classify-cancel">Cancelar</button>
+      </div>
+    </form>
+  `);
+  const { close } = openModal({ title: "Clasificar contacto", bodyEl: body });
+  const nameInp = body.querySelector("#classify-contact-name");
+  const errorEl = body.querySelector(".classify-form-error");
+  body.querySelector(".classify-cancel").addEventListener("click", close);
+  body.querySelector(".classify-clear-name").addEventListener("click", () => {
+    nameInp.value = "";
+    nameInp.focus();
+  });
+  const goConfig = body.querySelector(".classify-go-config");
+  if (goConfig) goConfig.addEventListener("click", close);
+
+  body.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    errorEl.style.display = "none";
+    const submitBtn = body.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
+
+    const selectedIds = Array.from(body.querySelectorAll(".classify-options input:checked")).map((i) =>
+      parseInt(i.value, 10)
+    );
+    const idsChanged =
+      selectedIds.length !== assigned.size || selectedIds.some((id) => !assigned.has(id));
+    const newName = nameInp.value.trim();
+    const nameChanged = newName !== (conv.doctor_contact_name || "");
+
+    let updated = conv;
+    try {
+      if (idsChanged) {
+        const res = await apiFetch(
+          `/doctors/${sessionDoctorId}/conversations/${conv.id}/contact-classifications`,
+          { method: "PUT", body: JSON.stringify({ classification_ids: selectedIds }) }
+        );
+        if (!res.ok) {
+          throw new Error(await apiErrorDetail(res, "No se pudieron guardar las clasificaciones."));
+        }
+        updated = await res.json();
+      }
+      if (nameChanged) {
+        const res = await apiFetch(
+          `/doctors/${sessionDoctorId}/conversations/${conv.id}/contact-name`,
+          { method: "PATCH", body: JSON.stringify({ doctor_contact_name: newName || null }) }
+        );
+        if (!res.ok) {
+          throw new Error(await apiErrorDetail(res, "No se pudo guardar el nombre."));
+        }
+        updated = await res.json();
+      }
+    } catch (err) {
+      errorEl.textContent = err.message;
+      errorEl.style.display = "block";
+      submitBtn.disabled = false;
+      // Lo que alcanzó a guardarse igual se refleja.
+      if (updated !== conv) onSaved(updated);
+      return;
+    }
+    close();
+    if (updated !== conv) onSaved(updated);
+  });
+}
+
 function dashboardTagBreakdownHtml(byTag) {
   const entries = Object.entries(byTag || {});
   if (!entries.length) {
@@ -411,6 +639,24 @@ function dashboardTagBreakdownHtml(byTag) {
       `
     )
     .join("");
+}
+
+function dashboardContactBreakdownHtml(data) {
+  const rows = (data.by_contact_classification || []).map(
+    (cc) => `
+      <div class="dashboard-tag-row">
+        ${contactBadgeHtml(cc)}
+        <span class="dashboard-tag-count">${cc.count}</span>
+      </div>
+    `
+  );
+  rows.push(`
+    <div class="dashboard-tag-row">
+      <span class="contact-badge contact-badge-none">Sin clasificar contacto</span>
+      <span class="dashboard-tag-count">${data.contact_unclassified_count ?? 0}</span>
+    </div>
+  `);
+  return rows.join("");
 }
 
 async function renderDashboard(container) {
@@ -442,7 +688,7 @@ async function renderDashboard(container) {
       </div>
       <div class="metric-card">
         <div class="metric-value">${data.unclassified_count}</div>
-        <div class="metric-label">Sin clasificar</div>
+        <div class="metric-label">Sin estado</div>
       </div>
       <div class="metric-card">
         <div class="metric-value">${data.bot_enabled_count}</div>
@@ -453,8 +699,10 @@ async function renderDashboard(container) {
         <div class="metric-label">Bot desactivado</div>
       </div>
     </div>
-    <h2>Por clasificación</h2>
+    <h2>Por estado conversación</h2>
     <div class="dashboard-tag-list">${dashboardTagBreakdownHtml(data.by_classification_tag)}</div>
+    <h2>Por clasificación contacto</h2>
+    <div class="dashboard-tag-list">${dashboardContactBreakdownHtml(data)}</div>
     <h2>Conversaciones recientes</h2>
     <div id="dashboard-recent"></div>
   `;
@@ -465,15 +713,12 @@ async function renderDashboard(container) {
     recentEl.innerHTML = `<p class="meta">No hay conversaciones.</p>`;
   } else {
     for (const c of recent) {
-      const nameHtml = c.contact_name
-        ? `<span class="contact-name">${escapeHtml(c.contact_name)}</span>`
-        : "";
       const row = el(`
         <div class="conversation-row">
           <div class="conv-info">
-            ${nameHtml}
+            <div>${contactNamesHtml(c)}</div>
             <strong>${escapeHtml(c.phone_number)}</strong>
-            <div class="meta">Actualizado: ${formatDate(c.updated_at)}</div>
+            <div class="meta">${escapeHtml(lastMessageText(c))}</div>
           </div>
           <div class="conv-actions">
             <button type="button" class="sm" data-chat="${c.id}">Ver conversación</button>
@@ -495,6 +740,7 @@ async function renderList(container, route) {
   container.classList.remove("chat-mode");
 
   const wrap = el(`<div class="card"><h1>Conversaciones</h1></div>`);
+  container.appendChild(wrap);
 
   // Search bar (created once — not destroyed on data reload)
   const searchWrap = el(`
@@ -599,88 +845,125 @@ async function renderList(container, route) {
   });
   // ── End tag action row ────────────────────────────────────────────────────
 
-  // ── Filter pills ──────────────────────────────────────────────────────────
-  const FILTER_TAGS = [
-    { key: "Preguntas frecuentes",      cls: "blue"   },
-    { key: "Agendamiento",              cls: "green"  },
-    { key: "Requiere asistente humano", cls: "orange" },
-    { key: "Conversacion finalizada",   cls: "purple" },
-    { key: "Mal uso del bot",           cls: "red"    },
+  // ── Filtros (desplegables) ────────────────────────────────────────────────
+  const STATE_FILTER_OPTIONS = [
+    { value: "", label: "Todos" },
+    { value: "__none__", label: "Sin clasificar" },
+    { value: "Preguntas frecuentes", label: "Preguntas frecuentes" },
+    { value: "Agendamiento", label: "Agendamiento" },
+    { value: "Requiere asistente humano", label: "Requiere asistente humano" },
+    { value: "Conversacion finalizada", label: "Conversacion finalizada" },
+    { value: "Mal uso del bot", label: "Mal uso del bot" },
   ];
 
-  const filterWrap = document.createElement("div");
-  filterWrap.className = "conv-filter-wrap";
-
-  // Fila 1: Todos + Sin clasificar (centrada)
-  const filterRow1 = document.createElement("div");
-  filterRow1.className = "conv-filter-row";
-
-  // Fila 2: tags individuales (centrada)
-  const filterRow2 = document.createElement("div");
-  filterRow2.className = "conv-filter-row";
-
-  function updateFilterPillStates() {
-    const noFilter = listTagFilter.size === 0;
-    allPill.classList.toggle("filter-pill-all-active", noFilter);
-    for (const { key } of FILTER_TAGS) {
-      const p = pillMap.get(key);
-      if (p) p.classList.toggle("filter-pill-active", listTagFilter.has(key));
-    }
-    nonePill.classList.toggle("filter-pill-active", listTagFilter.has("__none__"));
+  // Una sola carga por vista: se reutiliza para el filtro y el modal "Clasificar".
+  const classifications = (await fetchContactClassifications()) || [];
+  if (sessionDoctorId == null) return;
+  // Descartar del filtro clasificaciones que ya no existen.
+  const existingIds = new Set(classifications.map((cc) => cc.id));
+  for (const id of Array.from(listContactFilter)) {
+    if (!existingIds.has(id)) listContactFilter.delete(id);
   }
 
-  // "Todos" pill → fila 1
-  const allPill = document.createElement("button");
-  allPill.type = "button";
-  allPill.className = "filter-pill filter-pill-all" + (listTagFilter.size === 0 ? " filter-pill-all-active" : "");
-  allPill.textContent = "Todos";
-  allPill.addEventListener("click", () => {
-    listTagFilter.clear();
-    updateFilterPillStates();
-    loadData(1);
-  });
-  filterRow1.appendChild(allPill);
-
-  // "Sin clasificar" pill → fila 1
-  const nonePill = document.createElement("button");
-  nonePill.type = "button";
-  nonePill.className = "filter-pill filter-pill-tag filter-pill-none" + (listTagFilter.has("__none__") ? " filter-pill-active" : "");
-  nonePill.textContent = "Sin clasificar";
-  nonePill.addEventListener("click", () => {
-    if (listTagFilter.has("__none__")) listTagFilter.delete("__none__");
-    else listTagFilter.add("__none__");
-    updateFilterPillStates();
-    loadData(1);
-  });
-  filterRow1.appendChild(nonePill);
-
-  // Tag pills → fila 2
-  const pillMap = new Map();
-  for (const { key, cls } of FILTER_TAGS) {
-    const pill = document.createElement("button");
-    pill.type = "button";
-    pill.className = `filter-pill filter-pill-tag filter-pill-${cls}` + (listTagFilter.has(key) ? " filter-pill-active" : "");
-    pill.textContent = key;
-    pill.addEventListener("click", () => {
-      if (listTagFilter.has(key)) listTagFilter.delete(key);
-      else listTagFilter.add(key);
-      updateFilterPillStates();
-      loadData(1);
-    });
-    pillMap.set(key, pill);
-    filterRow2.appendChild(pill);
-  }
-
-  filterWrap.appendChild(filterRow1);
-  filterWrap.appendChild(filterRow2);
+  const filterWrap = el(`
+    <div class="conv-filter-bar">
+      <label class="filter-field">
+        <span class="filter-field-label">Estado conversación</span>
+        <select id="filter-state" class="filter-select">
+          ${STATE_FILTER_OPTIONS.map(
+            (o) => `<option value="${escapeAttr(o.value)}">${escapeHtml(o.label)}</option>`
+          ).join("")}
+        </select>
+      </label>
+      <div class="filter-field">
+        <span class="filter-field-label">Clasificación contacto</span>
+        <details class="filter-dropdown" id="filter-contact">
+          <summary class="filter-select"></summary>
+          <div class="filter-dropdown-panel"></div>
+        </details>
+      </div>
+    </div>
+  `);
   wrap.appendChild(filterWrap);
-  // ── End filter pills ──────────────────────────────────────────────────────
+
+  const stateSelect = filterWrap.querySelector("#filter-state");
+  stateSelect.value = listStateFilter;
+  stateSelect.addEventListener("change", () => {
+    listStateFilter = stateSelect.value;
+    loadData(1);
+  });
+
+  const contactDropdown = filterWrap.querySelector("#filter-contact");
+  const contactSummary = contactDropdown.querySelector("summary");
+  const contactPanel = contactDropdown.querySelector(".filter-dropdown-panel");
+
+  function contactSummaryText() {
+    if (listContactNone) return "Sin clasificar contacto";
+    if (!listContactFilter.size) return "Todas";
+    const names = classifications.filter((cc) => listContactFilter.has(cc.id)).map((cc) => cc.name);
+    return names.length <= 2 ? names.join(" + ") : `${names.length} seleccionadas`;
+  }
+
+  function renderContactPanel() {
+    contactSummary.textContent = contactSummaryText();
+    const optionsHtml = classifications
+      .map(
+        (cc) => `
+          <label class="filter-dropdown-option">
+            <input type="checkbox" data-cc-id="${cc.id}" ${listContactFilter.has(cc.id) ? "checked" : ""} />
+            ${contactBadgeHtml(cc)}
+          </label>
+        `
+      )
+      .join("");
+    contactPanel.innerHTML = `
+      <label class="filter-dropdown-option">
+        <input type="checkbox" data-cc-none="1" ${listContactNone ? "checked" : ""} />
+        <span class="contact-badge contact-badge-none">Sin clasificar contacto</span>
+      </label>
+      ${classifications.length ? `<div class="filter-dropdown-sep"></div>${optionsHtml}` : `
+        <p class="meta filter-dropdown-empty">Aún no hay clasificaciones.
+          <a href="#/classifications">Crear clasificaciones</a></p>`}
+      <div class="filter-dropdown-actions">
+        <button type="button" class="secondary sm" data-cc-clear="1">Limpiar</button>
+      </div>
+    `;
+  }
+
+  // Marcar "Sin clasificar contacto" desmarca las demás; marcar una clasificación lo desmarca.
+  contactPanel.addEventListener("change", (ev) => {
+    const input = ev.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    if (input.dataset.ccNone) {
+      listContactNone = input.checked;
+      if (listContactNone) listContactFilter.clear();
+    } else if (input.dataset.ccId) {
+      const id = parseInt(input.dataset.ccId, 10);
+      if (input.checked) {
+        listContactFilter.add(id);
+        listContactNone = false;
+      } else {
+        listContactFilter.delete(id);
+      }
+    }
+    renderContactPanel();
+    loadData(1);
+  });
+  contactPanel.addEventListener("click", (ev) => {
+    if (ev.target instanceof HTMLElement && ev.target.dataset.ccClear) {
+      listContactFilter.clear();
+      listContactNone = false;
+      renderContactPanel();
+      loadData(1);
+    }
+  });
+  renderContactPanel();
+  // ── Fin filtros ───────────────────────────────────────────────────────────
 
   const toolbarSlot = document.createElement("div");
   const listEl = document.createElement("div");
   wrap.appendChild(toolbarSlot);
   wrap.appendChild(listEl);
-  container.appendChild(wrap);
 
   async function loadData(p) {
     page = p;
@@ -688,9 +971,15 @@ async function renderList(container, route) {
     const search = listSearchQuery.trim();
     let apiPath = `/doctors/${sessionDoctorId}/conversations?limit=${pageSize}&offset=${offset}`;
     if (search) apiPath += `&search=${encodeURIComponent(search)}`;
-    if (listTagFilter.size > 0) {
-      apiPath += `&tags=${encodeURIComponent(Array.from(listTagFilter).join(","))}`;
+    if (listStateFilter) {
+      apiPath += `&tags=${encodeURIComponent(listStateFilter)}`;
     }
+    if (listContactNone) {
+      apiPath += `&contact_classifications=__none__`;
+    } else if (listContactFilter.size > 0) {
+      apiPath += `&contact_classifications=${encodeURIComponent(Array.from(listContactFilter).join(","))}`;
+    }
+    const hasFilters = !!(search || listStateFilter || listContactNone || listContactFilter.size);
 
     const res = await apiFetch(apiPath);
     if (res.status === 401) {
@@ -730,15 +1019,12 @@ async function renderList(container, route) {
     // Rebuild list items
     listEl.innerHTML = "";
     if (!items.length) {
-      const msg = search ? "No hay conversaciones que coincidan." : "No hay conversaciones.";
+      const msg = hasFilters ? "No hay conversaciones que coincidan." : "No hay conversaciones.";
       listEl.innerHTML = `<p class="meta">${escapeHtml(msg)}</p>`;
       return;
     }
 
     for (const c of items) {
-      const nameHtml = c.contact_name
-        ? `<span class="contact-name">${escapeHtml(c.contact_name)}</span>`
-        : "";
       const tagHtml = c.classification_tag
         ? `<span class="conv-tag conv-tag-${convTagClass(c.classification_tag)}">${escapeHtml(c.classification_tag)}</span>`
         : "";
@@ -746,17 +1032,23 @@ async function renderList(container, route) {
       const row = el(`
         <div class="conversation-row">
           <div class="conv-info">
-            ${nameHtml}
+            <div>${contactNamesHtml(c)}</div>
             <strong>${escapeHtml(c.phone_number)}</strong>
-            <div class="meta">Actualizado: ${formatDate(c.updated_at)}</div>
+            <div class="meta">${escapeHtml(lastMessageText(c))}</div>
             ${tagHtml}
+            <div class="contact-badges">${contactBadgesHtml(c.contact_classifications)}</div>
           </div>
           <div class="conv-actions">
             <button type="button" class="sm" data-chat="${c.id}">Ver conversación</button>
+            <button type="button" class="secondary sm" data-classify="${c.id}">Clasificar</button>
             <button type="button" class="secondary sm" data-files="${c.id}">Archivos</button>
           </div>
         </div>
       `);
+      // Clasificar/renombrar no cambia el orden (va por último mensaje): se recarga la misma página.
+      row.querySelector(`[data-classify]`).addEventListener("click", () => {
+        openClassifyModal(c, classifications, () => loadData(page));
+      });
       row.querySelector(`[data-chat]`).addEventListener("click", () => {
         navTo("chat", { conversationId: c.id, page: 1, pageSize });
       });
@@ -1016,6 +1308,234 @@ async function renderKnowledge(container, route) {
   wrap.querySelector("#kb-search").addEventListener("input", applyFiltersAndRender);
   wrap.querySelector("#kb-category-filter").addEventListener("change", applyFiltersAndRender);
   wrap.querySelector("#kb-show-deleted").addEventListener("change", applyFiltersAndRender);
+
+  await refresh();
+}
+
+// ── Clasificaciones de contacto (configuración) ─────────────────────────────
+
+function classificationRowHtml(cc) {
+  return `
+    <tr data-cc-id="${cc.id}">
+      <td>${contactBadgeHtml(cc)}</td>
+      <td class="cell-preview">${escapeHtml(cc.description || "")}</td>
+      <td>${cc.conversation_count}</td>
+      <td class="table-actions">
+        <button type="button" class="btn sm secondary cc-edit-btn">Editar</button>
+        <button type="button" class="btn sm secondary cc-delete-btn">Eliminar</button>
+      </td>
+    </tr>
+  `;
+}
+
+async function renderClassifications(container) {
+  container.innerHTML = "";
+  container.classList.remove("chat-mode");
+
+  const wrap = el(`
+    <div class="card">
+      <h1>Clasificaciones</h1>
+      <p class="meta">
+        Clasificaciones propias para tus contactos (por ejemplo "Balón", "Bypass" o "Post Operatorio").
+        Un contacto puede tener varias; se asignan con el botón "Clasificar" del listado de
+        conversaciones o desde el chat.
+      </p>
+      <div class="card-header-row">
+        <button type="button" id="cc-add-btn">Agregar</button>
+      </div>
+      <div id="cc-table-wrap"><p class="meta">Cargando…</p></div>
+    </div>
+  `);
+  container.appendChild(wrap);
+  const tableWrap = wrap.querySelector("#cc-table-wrap");
+
+  let items = [];
+
+  function swatchHtml(hex, title) {
+    const c = safeHexColor(hex);
+    return `<button type="button" class="color-swatch" data-color="${c}" title="${escapeAttr(title)}"
+      aria-label="${escapeAttr(title)}" style="background:${c}"></button>`;
+  }
+
+  function openFormModal(cc) {
+    const presetHexes = new Set(CONTACT_PRESET_COLORS.map((p) => p.hex));
+    // Colores propios ya usados en sus otras clasificaciones (que no sean predefinidos).
+    const ownColors = [
+      ...new Set(
+        items
+          .filter((x) => !cc || x.id !== cc.id)
+          .map((x) => safeHexColor(x.color))
+          .filter((hex) => !presetHexes.has(hex))
+      ),
+    ];
+    let color = safeHexColor(cc ? cc.color : CONTACT_PRESET_COLORS[0].hex);
+
+    const body = el(`
+      <form class="cc-form">
+        <div class="cc-form-error error" style="display:none"></div>
+
+        <label for="cc-name">Nombre</label>
+        <input id="cc-name" type="text" maxlength="${CONTACT_NAME_MAX}" required autocomplete="off"
+          value="${escapeAttr(cc ? cc.name : "")}" />
+        <div class="char-counter meta" id="cc-name-counter"></div>
+
+        <label for="cc-description">Descripción (opcional)</label>
+        <textarea id="cc-description" rows="3" maxlength="${CONTACT_DESCRIPTION_MAX}">${escapeHtml(
+          cc ? cc.description || "" : ""
+        )}</textarea>
+        <div class="char-counter meta" id="cc-description-counter"></div>
+
+        <label>Color</label>
+        <div class="color-swatches">
+          ${CONTACT_PRESET_COLORS.map((p) => swatchHtml(p.hex, p.name)).join("")}
+        </div>
+        ${
+          ownColors.length
+            ? `<p class="meta color-swatches-title">Tus colores</p>
+               <div class="color-swatches">${ownColors.map((hex) => swatchHtml(hex, hex)).join("")}</div>`
+            : ""
+        }
+        <label class="color-custom">
+          <span>Otro color</span>
+          <input type="color" id="cc-color-custom" value="${color}" />
+        </label>
+
+        <p class="meta">Vista previa: <span id="cc-preview"></span></p>
+
+        <div class="form-actions">
+          <button type="submit">Guardar</button>
+          <button type="button" class="btn sm secondary cc-cancel-btn">Cancelar</button>
+        </div>
+      </form>
+    `);
+    const { close } = openModal({
+      title: cc ? "Editar clasificación" : "Agregar clasificación",
+      bodyEl: body,
+    });
+
+    const nameInp = body.querySelector("#cc-name");
+    const descInp = body.querySelector("#cc-description");
+    const customInp = body.querySelector("#cc-color-custom");
+    const errorEl = body.querySelector(".cc-form-error");
+
+    function refreshForm() {
+      body.querySelector("#cc-name-counter").textContent = `${nameInp.value.length} / ${CONTACT_NAME_MAX}`;
+      body.querySelector("#cc-description-counter").textContent =
+        `${descInp.value.length} / ${CONTACT_DESCRIPTION_MAX}`;
+      body.querySelectorAll(".color-swatch").forEach((s) => {
+        s.classList.toggle("selected", s.dataset.color === color);
+      });
+      body.querySelector("#cc-preview").innerHTML = contactBadgeHtml({
+        name: nameInp.value.trim() || "Ejemplo",
+        color,
+      });
+    }
+
+    body.querySelectorAll(".color-swatch").forEach((s) => {
+      s.addEventListener("click", () => {
+        color = safeHexColor(s.dataset.color);
+        customInp.value = color;
+        refreshForm();
+      });
+    });
+    customInp.addEventListener("input", () => {
+      color = safeHexColor(customInp.value);
+      refreshForm();
+    });
+    nameInp.addEventListener("input", refreshForm);
+    descInp.addEventListener("input", refreshForm);
+    body.querySelector(".cc-cancel-btn").addEventListener("click", close);
+    refreshForm();
+
+    body.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      errorEl.style.display = "none";
+      const payload = {
+        name: nameInp.value.trim(),
+        description: descInp.value.trim() || null,
+        color,
+      };
+      if (!payload.name) {
+        errorEl.textContent = "El nombre es obligatorio.";
+        errorEl.style.display = "block";
+        return;
+      }
+      const res = cc
+        ? await apiFetch(`/doctors/${sessionDoctorId}/contact-classifications/${cc.id}`, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          })
+        : await apiFetch(`/doctors/${sessionDoctorId}/contact-classifications`, {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+      if (res.ok) {
+        close();
+        await refresh();
+        return;
+      }
+      errorEl.textContent = await apiErrorDetail(res, "No se pudo guardar. Intenta nuevamente.");
+      errorEl.style.display = "block";
+    });
+  }
+
+  async function deleteClassification(cc) {
+    const n = cc.conversation_count;
+    const affected =
+      n === 0
+        ? "Ninguna conversación la tiene asignada."
+        : n === 1
+        ? "1 conversación perderá esta clasificación (si no tiene otra, quedará como \"Sin clasificar contacto\")."
+        : `${n} conversaciones perderán esta clasificación (las que no tengan otra quedarán como "Sin clasificar contacto").`;
+    if (!window.confirm(`¿Eliminar la clasificación "${cc.name}"?\n\n${affected}`)) return;
+    const res = await apiFetch(`/doctors/${sessionDoctorId}/contact-classifications/${cc.id}`, {
+      method: "DELETE",
+    });
+    if (res.ok) {
+      await refresh();
+    } else {
+      window.alert("No se pudo eliminar la clasificación.");
+    }
+  }
+
+  function renderTable() {
+    if (!items.length) {
+      tableWrap.innerHTML = `<p class="meta">Aún no hay clasificaciones. Usa "Agregar" para crear la primera.</p>`;
+      return;
+    }
+    const table = el(`
+      <table>
+        <thead>
+          <tr><th>Clasificación</th><th>Descripción</th><th>Conversaciones</th><th></th></tr>
+        </thead>
+        <tbody>${items.map(classificationRowHtml).join("")}</tbody>
+      </table>
+    `);
+    tableWrap.innerHTML = "";
+    const scroller = document.createElement("div");
+    scroller.className = "table-scroll";
+    scroller.appendChild(table);
+    tableWrap.appendChild(scroller);
+
+    tableWrap.querySelectorAll("tr[data-cc-id]").forEach((tr) => {
+      const cc = items.find((x) => x.id === parseInt(tr.dataset.ccId, 10));
+      tr.querySelector(".cc-edit-btn").addEventListener("click", () => openFormModal(cc));
+      tr.querySelector(".cc-delete-btn").addEventListener("click", () => deleteClassification(cc));
+    });
+  }
+
+  async function refresh() {
+    const list = await fetchContactClassifications();
+    if (sessionDoctorId == null) return;
+    if (list == null) {
+      tableWrap.innerHTML = `<div class="error">No se pudo cargar la lista.</div>`;
+      return;
+    }
+    items = list;
+    renderTable();
+  }
+
+  wrap.querySelector("#cc-add-btn").addEventListener("click", () => openFormModal(null));
 
   await refresh();
 }
@@ -1333,7 +1853,7 @@ async function renderChat(container, conversationId, route) {
     container.innerHTML = `<div class="card error">Conversación no encontrada.</div>`;
     return;
   }
-  const conv = await convRes.json();
+  let conv = await convRes.json();
 
   // 2. Initial messages (newest 50, reversed for display)
   const msgRes = await apiFetch(
@@ -1365,9 +1885,7 @@ async function renderChat(container, conversationId, route) {
         <button type="button" class="secondary sm" id="chat-back">← Listado</button>
         <button type="button" class="secondary sm" id="chat-files">Archivos</button>
       </div>
-      <div class="chat-header-center">
-        <span>${escapeHtml(conv.phone_number)}</span>
-      </div>
+      <div class="chat-header-center" id="chat-header-info"></div>
       <div class="chat-header-right">
         <button type="button" class="bot-toggle-btn ${botEnabled ? "bot-on" : "bot-off"}" id="chat-bot-toggle">
           <span class="bot-toggle-dot"></span>
@@ -1406,6 +1924,34 @@ async function renderChat(container, conversationId, route) {
   const botStatusEl = wrapper.querySelector("#chat-bot-status");
   const textarea = wrapper.querySelector("#chat-textarea");
   const sendBtn = wrapper.querySelector("#chat-send-btn");
+  const headerInfo = wrapper.querySelector("#chat-header-info");
+
+  // Nombre(s), número y clasificaciones; clic abre el modal "Clasificar".
+  // Se actualiza en el lugar (sin re-render) para no reiniciar el polling ni el scroll.
+  function renderHeaderInfo() {
+    headerInfo.innerHTML = `
+      <button type="button" class="chat-header-classify" title="Clasificar contacto">
+        <span class="chat-header-names">${contactNamesHtml(conv)}</span>
+        <span class="chat-header-phone">${escapeHtml(conv.phone_number)}</span>
+        <span class="contact-badges">${contactBadgesHtml(conv.contact_classifications)}</span>
+      </button>
+    `;
+    headerInfo.querySelector(".chat-header-classify").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      const classifications = await fetchContactClassifications();
+      btn.disabled = false;
+      if (classifications == null) {
+        if (sessionDoctorId != null) window.alert("No se pudieron cargar las clasificaciones.");
+        return;
+      }
+      openClassifyModal(conv, classifications, (updated) => {
+        conv = updated;
+        renderHeaderInfo();
+      });
+    });
+  }
+  renderHeaderInfo();
 
   function updateBotUI(enabled) {
     botEnabled = enabled;
@@ -1788,6 +2334,10 @@ async function render() {
     await renderSystemPrompt(app, route);
     return;
   }
+  if (route.view === "classifications") {
+    await renderClassifications(app, route);
+    return;
+  }
   await renderDashboard(app, route);
 }
 
@@ -1814,6 +2364,13 @@ document.getElementById("btn-logout").addEventListener("click", async () => {
 
 window.addEventListener("hashchange", () => {
   render();
+});
+
+// Desplegables de filtros: se cierran al hacer clic fuera.
+document.addEventListener("click", (ev) => {
+  document.querySelectorAll("details.filter-dropdown[open]").forEach((d) => {
+    if (!d.contains(ev.target)) d.removeAttribute("open");
+  });
 });
 
 if (!location.hash || location.hash === "#") {
@@ -1853,12 +2410,27 @@ render();
   function applyCollapsed(collapsed) {
     sidebar.classList.toggle("collapsed", collapsed);
     localStorage.setItem("coyote-portal-sidebar-collapsed", collapsed ? "1" : "0");
+    if (collapsed) closeAllSidebarGroups();
   }
 
   applyCollapsed(localStorage.getItem("coyote-portal-sidebar-collapsed") === "1");
 
   btn.addEventListener("click", () => {
     applyCollapsed(!sidebar.classList.contains("collapsed"));
+  });
+
+  // Clic en un grupo: abre/cierra. Con el sidebar colapsado (escritorio),
+  // primero lo expande y abre el grupo.
+  const mobileQuery = window.matchMedia("(max-width: 640px)");
+  sidebar.querySelectorAll(".sidebar-group").forEach((group) => {
+    group.querySelector(".sidebar-group-btn").addEventListener("click", () => {
+      if (sidebar.classList.contains("collapsed") && !mobileQuery.matches) {
+        applyCollapsed(false);
+        setSidebarGroupOpen(group, true);
+        return;
+      }
+      setSidebarGroupOpen(group, !group.classList.contains("open"));
+    });
   });
 })();
 
