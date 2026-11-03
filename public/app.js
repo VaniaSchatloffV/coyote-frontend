@@ -141,6 +141,12 @@ function parseHash() {
   if (parts[0] === "classifications") {
     return { view: "classifications", page: 1, pageSize: 20 };
   }
+  if (parts[0] === "bulk-send") {
+    return { view: "bulk-send", page, pageSize };
+  }
+  if (parts[0] === "catchup") {
+    return { view: "catchup", page: 1, pageSize: 20 };
+  }
   // Empty path (#/) and any unrecognized path resolve to the dashboard (new home).
   return { view: "dashboard", page, pageSize };
 }
@@ -200,6 +206,10 @@ function updateActiveNav(view) {
       ? "prompt"
       : view === "classifications"
       ? "classifications"
+      : view === "bulk-send"
+      ? "bulk-send"
+      : view === "catchup"
+      ? "catchup"
       : "dashboard";
   document.querySelectorAll(".sidebar-link").forEach((link) => {
     link.classList.toggle("active", link.dataset.route === activeRoute);
@@ -1540,6 +1550,1044 @@ async function renderClassifications(container) {
   await refresh();
 }
 
+// ── Envío masivo y catchup (helpers compartidos) ────────────────────────────
+
+const CHILE_TZ = "America/Santiago";
+// WhatsApp: texto solo hasta 1600 caracteres (un mensaje); pie de imagen hasta 1024.
+const OUTBOUND_TEXT_MAX = 1600;
+const OUTBOUND_CAPTION_MAX = 1024;
+const OUTBOUND_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const OUTBOUND_IMAGE_TYPES = ["image/jpeg", "image/png"];
+// Agregar imágenes al envío masivo y al catchup: deshabilitado mientras se corrige el
+// enlace de S3 que Twilio no puede descargar (403). Para reactivarlo, poner true.
+// Con false, una imagen ya guardada se sigue mostrando, solo con la opción de quitarla.
+const OUTBOUND_IMAGES_ENABLED = false;
+const CONVERSATION_STATES = [
+  "Preguntas frecuentes",
+  "Agendamiento",
+  "Requiere asistente humano",
+  "Conversacion finalizada",
+  "Mal uso del bot",
+];
+
+/** Si la sesión expiró, vuelve al login. Devuelve true si redirigió. */
+async function handleUnauthorized(res) {
+  if (res.status !== 401) return false;
+  sessionDoctorId = null;
+  location.hash = "#/login";
+  await render();
+  return true;
+}
+
+function formatChile(iso, opts = {}) {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleString("es-CL", {
+      timeZone: CHILE_TZ,
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      ...opts,
+    });
+  } catch {
+    return iso;
+  }
+}
+
+/** Valor para <input type="datetime-local"> en hora de Chile ("YYYY-MM-DDTHH:MM"). */
+function chileLocalInputValue(iso) {
+  const parts = {};
+  for (const p of new Intl.DateTimeFormat("en-CA", {
+    timeZone: CHILE_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(iso))) {
+    parts[p.type] = p.value;
+  }
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+}
+
+/** Valida la imagen elegida; devuelve un mensaje de error o "" si está bien. */
+function outboundImageError(file) {
+  if (!file) return "";
+  if (!OUTBOUND_IMAGE_TYPES.includes(file.type)) return "La imagen debe ser JPG o PNG.";
+  if (file.size > OUTBOUND_IMAGE_MAX_BYTES) return "La imagen no puede superar 5 MB.";
+  return "";
+}
+
+/** Contador "n / máx" que se pone rojo al pasarse. */
+function updateOutboundCounter(counterEl, text, hasImage) {
+  const max = hasImage ? OUTBOUND_CAPTION_MAX : OUTBOUND_TEXT_MAX;
+  const n = text.length;
+  counterEl.textContent =
+    `${n} / ${max} caracteres` + (hasImage ? " (con imagen, WhatsApp admite hasta 1024)" : "");
+  counterEl.classList.toggle("over-limit", n > max);
+  return n <= max;
+}
+
+/** Bloque de explicaciones para usuarios no técnicos (abierto por defecto). */
+function whatsappRulesHtml({ title, items }) {
+  return `
+    <details class="prompt-help" open>
+      <summary>${escapeHtml(title)}</summary>
+      <div class="prompt-help-body">
+        ${items
+          .map(([h, p]) => `<h3>${escapeHtml(h)}</h3><p>${escapeHtml(p)}</p>`)
+          .join("")}
+      </div>
+    </details>
+  `;
+}
+
+const RULE_WINDOW = [
+  "La ventana de 24 horas de WhatsApp",
+  "WhatsApp solo permite escribirle a un paciente si él te escribió en las últimas 24 horas. " +
+    "Cada vez que el paciente escribe, la ventana se abre de nuevo por 24 horas. Nuestros mensajes NO la extienden: " +
+    "solo un mensaje del paciente la reinicia.",
+];
+const RULE_COST = [
+  "Costo",
+  "Desde el 1 de octubre de 2026, WhatsApp (Meta) regala 1.000 mensajes al mes por número. " +
+    "Después de eso, cada mensaje enviado dentro de la ventana tiene costo. El contador de abajo te ayuda a seguirlo.",
+];
+const RULE_BLOCKS = [
+  "Riesgo de bloqueos",
+  "Si muchos pacientes bloquean o reportan tu número, WhatsApp baja su calidad y puede limitar tus envíos. " +
+    "WhatsApp no avisa cuando un paciente te bloquea. Envía solo mensajes útiles y a quienes esperan recibirlos.",
+];
+
+function messageStatsHtml(stats) {
+  const by = stats.by_source || {};
+  const row = (label, n) =>
+    `<div class="dashboard-tag-row"><span>${escapeHtml(label)}</span><span class="dashboard-tag-count">${n ?? 0}</span></div>`;
+  return `
+    <div class="stats-total"><strong>${stats.total}</strong> mensajes enviados en ${escapeHtml(stats.month)}</div>
+    <div class="stats-grid">
+      <div>
+        ${row("Bot", by.bot)}
+        ${row("Humano", by.human)}
+        ${row("Mensaje masivo", by.bulk)}
+        ${row("Catchup", by.catchup)}
+      </div>
+      <div>
+        ${row("Automáticos (Bot, Mensaje masivo, Catchup)", stats.automatic)}
+        ${row("Manuales (Humano)", stats.manual)}
+      </div>
+    </div>
+    <p class="meta">
+      Es un número aproximado: Meta cobra solo los mensajes que llegan al paciente, y una respuesta
+      larga del bot puede salir en varias partes aunque aquí cuente como una. Mes en hora de Chile.
+    </p>
+  `;
+}
+
+const BULK_STATUS_LABELS = {
+  scheduled: "Programado",
+  sending: "Enviando",
+  done: "Enviado",
+  cancelled: "Cancelado",
+};
+
+// ── Envío masivo ────────────────────────────────────────────────────────────
+
+async function renderBulkSend(container) {
+  container.innerHTML = "";
+  container.classList.remove("chat-mode");
+
+  const wrap = el(`
+    <div>
+      <div class="card">
+        <h1>Envío masivo</h1>
+        <p class="meta">Envía un mismo mensaje${
+          OUTBOUND_IMAGES_ENABLED ? " (texto y, si quieres, una imagen)" : ""
+        } a muchos contactos a la vez.</p>
+        ${whatsappRulesHtml({
+          title: "Antes de enviar: lee esto",
+          items: [
+            RULE_WINDOW,
+            [
+              "¿Quiénes quedan fuera?",
+              "Los contactos que no te han escrito en las últimas 24 horas (menos el margen de seguridad) no " +
+                "reciben el mensaje. La vista previa te muestra cuántos son. En un envío programado, la ventana " +
+                "se revisa al momento de enviar, no al programarlo.",
+            ],
+            [
+              "\"Enviado\" no es \"entregado\"",
+              "\"Enviado\" significa que WhatsApp recibió el mensaje para entregarlo. No sabemos si llegó al " +
+                "teléfono ni si el paciente lo leyó.",
+            ],
+            RULE_COST,
+            RULE_BLOCKS,
+            [
+              "Si eliges que el bot NO responda",
+              "El bot se apaga en cada conversación a la que llegue el mensaje, y queda apagado hasta que tú lo " +
+                "vuelvas a encender desde el chat. Tendrás que responder tú a quienes contesten.",
+            ],
+          ],
+        })}
+      </div>
+
+      <div class="card">
+        <h2>Mensajes enviados este mes</h2>
+        <div id="bulk-stats"><p class="meta">Cargando…</p></div>
+      </div>
+
+      <div class="card">
+        <h2>Margen de seguridad</h2>
+        <p class="meta">
+          Dejamos de enviar unos minutos antes de que cierre la ventana de 24 horas, para que un mensaje en
+          cola no llegue tarde y WhatsApp lo rechace. Se aplica a todos los envíos masivos.
+        </p>
+        <div class="inline-form">
+          <input type="number" id="bulk-margin" min="1" max="60" step="1" />
+          <span class="meta">minutos (de 1 a 60)</span>
+          <button type="button" class="sm" id="bulk-margin-save">Guardar</button>
+        </div>
+        <div id="bulk-margin-msg" class="meta"></div>
+      </div>
+
+      <div class="card" id="bulk-form-card"></div>
+
+      <div class="card">
+        <h2>Historial</h2>
+        <div id="bulk-history"><p class="meta">Cargando…</p></div>
+      </div>
+    </div>
+  `);
+  container.appendChild(wrap);
+
+  const classifications = (await fetchContactClassifications()) || [];
+  if (sessionDoctorId == null) return;
+
+  // ── Contador del mes ──
+  apiFetch(`/doctors/${sessionDoctorId}/message-stats`).then(async (res) => {
+    const target = wrap.querySelector("#bulk-stats");
+    if (!res.ok) {
+      target.innerHTML = `<div class="error">No se pudo cargar el contador.</div>`;
+      return;
+    }
+    target.innerHTML = messageStatsHtml(await res.json());
+  });
+
+  // ── Margen ──
+  const marginInp = wrap.querySelector("#bulk-margin");
+  const marginMsg = wrap.querySelector("#bulk-margin-msg");
+  let marginMinutes = 10;
+  {
+    const res = await apiFetch(`/doctors/${sessionDoctorId}/bulk-send-settings`);
+    if (await handleUnauthorized(res)) return;
+    if (res.ok) marginMinutes = (await res.json()).window_margin_minutes;
+    marginInp.value = String(marginMinutes);
+  }
+  wrap.querySelector("#bulk-margin-save").addEventListener("click", async () => {
+    const value = parseInt(marginInp.value, 10);
+    if (!Number.isFinite(value) || value < 1 || value > 60) {
+      marginMsg.className = "error";
+      marginMsg.textContent = "El margen debe estar entre 1 y 60 minutos.";
+      return;
+    }
+    const res = await apiFetch(`/doctors/${sessionDoctorId}/bulk-send-settings`, {
+      method: "PUT",
+      body: JSON.stringify({ window_margin_minutes: value }),
+    });
+    if (!res.ok) {
+      marginMsg.className = "error";
+      marginMsg.textContent = await apiErrorDetail(res, "No se pudo guardar el margen.");
+      return;
+    }
+    marginMinutes = value;
+    marginMsg.className = "success";
+    marginMsg.textContent = "Margen guardado.";
+    refreshPreview();
+  });
+
+  // ── Formulario ──
+  const formCard = wrap.querySelector("#bulk-form-card");
+  // Estado del formulario: filtros, agregados a mano, desmarcados, imagen y envío en edición.
+  let state;
+
+  function resetState(editing = null) {
+    state = {
+      editing, // envío programado que se está editando (detalle de la API) o null
+      tags: new Set(),
+      ccIds: new Set(),
+      ccNone: false,
+      manualIds: new Set(editing ? editing.conversation_ids : []),
+      excludedIds: new Set(),
+      items: [],
+      preview: null,
+      imageFile: null,
+      removeImage: false,
+    };
+  }
+
+  function hasImage() {
+    return !!state.imageFile || (!!state.editing && state.editing.has_image && !state.removeImage);
+  }
+
+  function renderForm() {
+    const editing = state.editing;
+    const stateOptions = [["__none__", "Sin estado"], ...CONVERSATION_STATES.map((s) => [s, s])];
+    formCard.innerHTML = `
+      <h2>${editing ? `Editar envío programado #${editing.id}` : "Nuevo envío"}</h2>
+      ${editing ? `<p class="meta">Estás editando un envío programado. Puedes cambiar todo: texto, imagen, fecha, contactos y si el bot responde.
+        <button type="button" class="secondary sm" id="bulk-edit-cancel">Salir sin guardar</button></p>` : ""}
+
+      <h3 class="form-section-title">1. Destinatarios</h3>
+      <p class="meta">Filtra por estado y/o clasificación (como en el listado de conversaciones), agrega contactos a mano
+        y desmarca los que no quieras.</p>
+      <div class="bulk-filters">
+        <div>
+          <span class="filter-field-label">Estado conversación (cualquiera de los marcados)</span>
+          <div class="check-list" id="bulk-tags">
+            ${stateOptions
+              .map(
+                ([v, label]) => `<label class="check-option"><input type="checkbox" value="${escapeAttr(v)}" ${
+                  state.tags.has(v) ? "checked" : ""
+                } /> ${escapeHtml(label)}</label>`
+              )
+              .join("")}
+          </div>
+        </div>
+        <div>
+          <span class="filter-field-label">Clasificación contacto (debe tener todas las marcadas)</span>
+          <div class="check-list" id="bulk-ccs">
+            <label class="check-option"><input type="checkbox" data-cc-none="1" ${state.ccNone ? "checked" : ""} />
+              <span class="contact-badge contact-badge-none">Sin clasificar contacto</span></label>
+            ${classifications
+              .map(
+                (cc) => `<label class="check-option"><input type="checkbox" data-cc-id="${cc.id}" ${
+                  state.ccIds.has(cc.id) ? "checked" : ""
+                } /> ${contactBadgeHtml(cc)}</label>`
+              )
+              .join("")}
+          </div>
+        </div>
+      </div>
+      <div class="bulk-manual">
+        <span class="filter-field-label">Agregar contactos a mano</span>
+        <input type="text" id="bulk-search" class="search-input" placeholder="Buscar por nombre o número…" autocomplete="off" />
+        <div id="bulk-search-results"></div>
+      </div>
+      <div id="bulk-recipients"><p class="meta">Elige un filtro o agrega contactos para ver la lista.</p></div>
+
+      <h3 class="form-section-title">2. Mensaje</h3>
+      <textarea id="bulk-message" rows="5" placeholder="Escribe el mensaje…">${escapeHtml(editing ? editing.message : "")}</textarea>
+      <div class="char-counter meta" id="bulk-counter"></div>
+      ${
+        OUTBOUND_IMAGES_ENABLED
+          ? `<label>Imagen (opcional, JPG o PNG, hasta 5 MB)</label>
+             <div id="bulk-image-current"></div>
+             <input type="file" id="bulk-image" accept="image/jpeg,image/png" />
+             <div id="bulk-image-error" class="error" style="display:none"></div>`
+          : editing && editing.has_image
+          ? `<label>Imagen</label>
+             <p class="meta">Por ahora no se pueden enviar imágenes. Quita la imagen para que el envío salga solo con texto.</p>
+             <div id="bulk-image-current"></div>`
+          : `<div id="bulk-image-current"></div>`
+      }
+
+      <h3 class="form-section-title">3. Cuándo</h3>
+      <label class="check-option"><input type="radio" name="bulk-when" value="now" ${
+        editing && !editing.is_immediate ? "" : "checked"
+      } /> Enviar ahora (sale en menos de un minuto)</label>
+      <label class="check-option"><input type="radio" name="bulk-when" value="later" ${
+        editing && !editing.is_immediate ? "checked" : ""
+      } /> Programar</label>
+      <div class="inline-form" id="bulk-when-row">
+        <input type="datetime-local" id="bulk-when-at" value="${
+          editing && !editing.is_immediate ? escapeAttr(chileLocalInputValue(editing.scheduled_at)) : ""
+        }" />
+        <span class="meta">hora de Chile</span>
+      </div>
+
+      <h3 class="form-section-title">4. Si el paciente responde</h3>
+      <label class="check-option"><input type="radio" name="bulk-bot" value="on" ${
+        editing && editing.disable_bot ? "" : "checked"
+      } /> El bot responde como siempre</label>
+      <label class="check-option"><input type="radio" name="bulk-bot" value="off" ${
+        editing && editing.disable_bot ? "checked" : ""
+      } /> El bot NO responde: se apaga en esas conversaciones y respondo yo</label>
+
+      <div id="bulk-form-error" class="error" style="display:none"></div>
+      <div class="form-actions">
+        <button type="button" id="bulk-review">Revisar y ${editing ? "guardar" : "enviar"}</button>
+      </div>
+    `;
+
+    const msgInp = formCard.querySelector("#bulk-message");
+    const counter = formCard.querySelector("#bulk-counter");
+    const imageInp = formCard.querySelector("#bulk-image");
+    const imageErr = formCard.querySelector("#bulk-image-error");
+    const whenRow = formCard.querySelector("#bulk-when-row");
+
+    function refreshCounter() {
+      updateOutboundCounter(counter, msgInp.value.trim(), hasImage());
+    }
+    function refreshWhen() {
+      const later = formCard.querySelector('input[name="bulk-when"]:checked').value === "later";
+      whenRow.style.display = later ? "" : "none";
+    }
+    function renderCurrentImage() {
+      const box = formCard.querySelector("#bulk-image-current");
+      if (editing && editing.has_image && !state.removeImage && !state.imageFile) {
+        box.innerHTML = `<div class="image-preview"><img src="${escapeAttr(resolveApiUrl(editing.image_url))}" alt="Imagen del envío" />
+          <button type="button" class="secondary sm" id="bulk-image-remove">Quitar imagen</button></div>`;
+        box.querySelector("#bulk-image-remove").addEventListener("click", () => {
+          state.removeImage = true;
+          renderCurrentImage();
+          refreshCounter();
+        });
+      } else if (state.imageFile) {
+        const url = URL.createObjectURL(state.imageFile);
+        box.innerHTML = `<div class="image-preview"><img src="${escapeAttr(url)}" alt="Imagen elegida" />
+          <button type="button" class="secondary sm" id="bulk-image-clear">Quitar imagen</button></div>`;
+        box.querySelector("#bulk-image-clear").addEventListener("click", () => {
+          state.imageFile = null;
+          imageInp.value = "";
+          renderCurrentImage();
+          refreshCounter();
+        });
+      } else {
+        box.innerHTML = "";
+      }
+    }
+
+    msgInp.addEventListener("input", refreshCounter);
+    if (imageInp) imageInp.addEventListener("change", () => {
+      const file = imageInp.files && imageInp.files[0];
+      const err = outboundImageError(file);
+      imageErr.textContent = err;
+      imageErr.style.display = err ? "block" : "none";
+      state.imageFile = err ? null : file || null;
+      if (err) imageInp.value = "";
+      renderCurrentImage();
+      refreshCounter();
+    });
+    formCard.querySelectorAll('input[name="bulk-when"]').forEach((r) => r.addEventListener("change", refreshWhen));
+
+    formCard.querySelector("#bulk-tags").addEventListener("change", (ev) => {
+      const input = ev.target;
+      if (input.checked) state.tags.add(input.value);
+      else state.tags.delete(input.value);
+      refreshPreview();
+    });
+    formCard.querySelector("#bulk-ccs").addEventListener("change", (ev) => {
+      const input = ev.target;
+      if (input.dataset.ccNone) {
+        state.ccNone = input.checked;
+        if (state.ccNone) state.ccIds.clear();
+      } else {
+        const id = parseInt(input.dataset.ccId, 10);
+        if (input.checked) {
+          state.ccIds.add(id);
+          state.ccNone = false;
+        } else {
+          state.ccIds.delete(id);
+        }
+      }
+      formCard.querySelectorAll("#bulk-ccs input").forEach((i) => {
+        i.checked = i.dataset.ccNone ? state.ccNone : state.ccIds.has(parseInt(i.dataset.ccId, 10));
+      });
+      refreshPreview();
+    });
+
+    // Búsqueda para agregar a mano (usa el listado de conversaciones).
+    const searchInp = formCard.querySelector("#bulk-search");
+    const searchResults = formCard.querySelector("#bulk-search-results");
+    let searchTimer = null;
+    searchInp.addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(async () => {
+        const q = searchInp.value.trim();
+        if (!q) {
+          searchResults.innerHTML = "";
+          return;
+        }
+        const res = await apiFetch(
+          `/doctors/${sessionDoctorId}/conversations?limit=10&offset=0&search=${encodeURIComponent(q)}`
+        );
+        if (!res.ok) return;
+        const items = (await res.json()).items || [];
+        searchResults.innerHTML = items.length
+          ? items
+              .map(
+                (c) => `<div class="search-result-row">
+                  <span>${contactNamesHtml(c)} <strong>${escapeHtml(c.phone_number)}</strong></span>
+                  <button type="button" class="secondary sm" data-add="${c.id}" ${
+                    state.manualIds.has(c.id) ? "disabled" : ""
+                  }>${state.manualIds.has(c.id) ? "Agregado" : "Agregar"}</button>
+                </div>`
+              )
+              .join("")
+          : `<p class="meta">Sin resultados.</p>`;
+      }, 300);
+    });
+    searchResults.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-add]");
+      if (!btn) return;
+      const id = parseInt(btn.dataset.add, 10);
+      state.manualIds.add(id);
+      state.excludedIds.delete(id);
+      btn.disabled = true;
+      btn.textContent = "Agregado";
+      refreshPreview();
+    });
+
+    const cancelEdit = formCard.querySelector("#bulk-edit-cancel");
+    if (cancelEdit) {
+      cancelEdit.addEventListener("click", () => {
+        resetState();
+        renderForm();
+      });
+    }
+
+    formCard.querySelector("#bulk-review").addEventListener("click", openReview);
+
+    renderCurrentImage();
+    refreshCounter();
+    refreshWhen();
+    refreshPreview();
+  }
+
+  // Varios clics seguidos en los filtros se agrupan en una sola consulta (el portal
+  // tiene un límite de consultas por minuto).
+  let previewSeq = 0;
+  let previewTimer = null;
+  function refreshPreview() {
+    clearTimeout(previewTimer);
+    const box = formCard.querySelector("#bulk-recipients");
+    if (box && (state.tags.size || state.ccIds.size || state.ccNone || state.manualIds.size)) {
+      box.innerHTML = `<p class="meta">Cargando contactos…</p>`;
+    }
+    previewTimer = setTimeout(loadPreview, 500);
+  }
+
+  async function loadPreview() {
+    const box = formCard.querySelector("#bulk-recipients");
+    if (!box) return;
+    const anyFilter = state.tags.size || state.ccIds.size || state.ccNone;
+    if (!anyFilter && !state.manualIds.size) {
+      state.items = [];
+      state.preview = null;
+      box.innerHTML = `<p class="meta">Elige un filtro o agrega contactos para ver la lista.</p>`;
+      return;
+    }
+    const seq = ++previewSeq;
+    box.innerHTML = `<p class="meta">Cargando contactos…</p>`;
+    const res = await apiFetch(`/doctors/${sessionDoctorId}/bulk-sends/preview`, {
+      method: "POST",
+      body: JSON.stringify({
+        tags: Array.from(state.tags),
+        contact_classification_ids: Array.from(state.ccIds),
+        contact_none: state.ccNone,
+        conversation_ids: Array.from(state.manualIds),
+        excluded_ids: Array.from(state.excludedIds),
+      }),
+    });
+    if (seq !== previewSeq) return; // llegó una respuesta más nueva
+    if (await handleUnauthorized(res)) return;
+    if (!res.ok) {
+      const fallback =
+        res.status === 429
+          ? "Demasiadas consultas seguidas. Espera un minuto y vuelve a intentar."
+          : "No se pudo cargar la lista.";
+      box.innerHTML = `<div class="error">${escapeHtml(await apiErrorDetail(res, fallback))}</div>`;
+      return;
+    }
+    state.preview = await res.json();
+    state.items = state.preview.items;
+    renderRecipients();
+  }
+
+  function selectedItems() {
+    return state.items.filter((i) => !state.excludedIds.has(i.id));
+  }
+
+  function renderRecipients() {
+    const box = formCard.querySelector("#bulk-recipients");
+    const items = state.items;
+    if (!items.length) {
+      box.innerHTML = `<p class="meta">Ningún contacto cumple los filtros.</p>`;
+      return;
+    }
+    const selected = selectedItems();
+    const open = selected.filter((i) => i.window_open).length;
+    const rows = items
+      .map((i) => {
+        const name = i.doctor_contact_name || i.contact_name || "";
+        const windowHtml = i.window_open
+          ? `<span class="window-open">Abierta hasta ${escapeHtml(formatChile(i.window_closes_at))}</span>`
+          : `<span class="window-closed">Cerrada${
+              i.last_user_message_at ? "" : " (nunca ha escrito)"
+            }</span>`;
+        return `<tr>
+          <td><input type="checkbox" data-rcpt="${i.id}" ${state.excludedIds.has(i.id) ? "" : "checked"} /></td>
+          <td>${escapeHtml(name)}</td>
+          <td>${escapeHtml(i.phone_number)}</td>
+          <td>${i.classification_tag ? `<span class="conv-tag conv-tag-${convTagClass(i.classification_tag)}">${escapeHtml(i.classification_tag)}</span>` : `<span class="meta">Sin estado</span>`}</td>
+          <td>${windowHtml}</td>
+        </tr>`;
+      })
+      .join("");
+    box.innerHTML = `
+      <p class="bulk-summary">
+        <strong>${selected.length}</strong> marcados ·
+        <span class="window-open"><strong>${open}</strong> con la ventana abierta</span> ·
+        <span class="window-closed"><strong>${selected.length - open}</strong> quedarían fuera (ventana cerrada)</span>
+      </p>
+      <div class="form-actions">
+        <button type="button" class="secondary sm" id="bulk-check-all">Marcar todos</button>
+        <button type="button" class="secondary sm" id="bulk-uncheck-all">Desmarcar todos</button>
+      </div>
+      <div class="table-scroll bulk-recipient-table">
+        <table>
+          <thead><tr><th></th><th>Nombre</th><th>Número</th><th>Estado</th><th>Ventana de 24 h</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+    box.querySelector("tbody").addEventListener("change", (ev) => {
+      const id = parseInt(ev.target.dataset.rcpt, 10);
+      if (ev.target.checked) state.excludedIds.delete(id);
+      else state.excludedIds.add(id);
+      renderRecipients();
+    });
+    box.querySelector("#bulk-check-all").addEventListener("click", () => {
+      state.excludedIds.clear();
+      renderRecipients();
+    });
+    box.querySelector("#bulk-uncheck-all").addEventListener("click", () => {
+      items.forEach((i) => state.excludedIds.add(i.id));
+      renderRecipients();
+    });
+  }
+
+  function showFormError(text) {
+    const err = formCard.querySelector("#bulk-form-error");
+    err.textContent = text;
+    err.style.display = text ? "block" : "none";
+  }
+
+  function openReview() {
+    showFormError("");
+    const message = formCard.querySelector("#bulk-message").value.trim();
+    const selected = selectedItems();
+    const open = selected.filter((i) => i.window_open).length;
+    const later = formCard.querySelector('input[name="bulk-when"]:checked').value === "later";
+    const whenAt = formCard.querySelector("#bulk-when-at").value;
+    const botOff = formCard.querySelector('input[name="bulk-bot"]:checked').value === "off";
+    const max = hasImage() ? OUTBOUND_CAPTION_MAX : OUTBOUND_TEXT_MAX;
+
+    if (state.preview && !state.preview.has_whatsapp_from) {
+      return showFormError("Tu cuenta no tiene un número de WhatsApp configurado. Contacta al administrador.");
+    }
+    if (!selected.length) return showFormError("Marca al menos un contacto.");
+    if (!message) return showFormError("Escribe el mensaje.");
+    if (message.length > max) return showFormError(`El mensaje supera ${max} caracteres.`);
+    if (later && !whenAt) return showFormError("Elige la fecha y hora del envío.");
+
+    const imgSrc = state.imageFile
+      ? URL.createObjectURL(state.imageFile)
+      : hasImage()
+      ? resolveApiUrl(state.editing.image_url)
+      : null;
+    const body = el(`
+      <div class="bulk-review">
+        <p><strong>${selected.length}</strong> contactos marcados.</p>
+        <p class="window-open"><strong>${open}</strong> recibirían el mensaje ahora (ventana abierta).</p>
+        ${
+          selected.length - open
+            ? `<p class="window-closed"><strong>${selected.length - open}</strong> quedarían fuera porque no te han escrito
+               en las últimas 24 horas (menos el margen de ${marginMinutes} min). WhatsApp no permite escribirles sin una
+               plantilla aprobada.</p>`
+            : ""
+        }
+        ${
+          later
+            ? `<p class="meta">Programado para el ${escapeHtml(whenAt.replace("T", " "))} (hora de Chile). La ventana de
+               cada contacto se revisa al momento de enviar, así que estos números pueden cambiar.</p>`
+            : `<p class="meta">Sale en menos de un minuto.</p>`
+        }
+        <p class="meta">${botOff ? "El bot se apagará en las conversaciones a las que llegue el mensaje." : "El bot responderá como siempre."}</p>
+        <label>Mensaje final</label>
+        <div class="bubble-row bubble-assistant"><div class="bubble">
+          ${imgSrc ? `<img class="review-image" src="${escapeAttr(imgSrc)}" alt="Imagen" />` : ""}
+          <div class="bubble-content">${escapeHtml(message)}</div>
+        </div></div>
+        <div class="bulk-review-error error" style="display:none"></div>
+        <div class="form-actions">
+          <button type="button" class="bulk-confirm">${state.editing ? "Guardar cambios" : later ? "Confirmar programación" : "Confirmar y enviar"}</button>
+          <button type="button" class="btn sm secondary bulk-back">Volver</button>
+        </div>
+      </div>
+    `);
+    const { close } = openModal({ title: "Vista previa", bodyEl: body });
+    body.querySelector(".bulk-back").addEventListener("click", close);
+    body.querySelector(".bulk-confirm").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      const fd = new FormData();
+      fd.append("message", message);
+      fd.append("conversation_ids", JSON.stringify(selected.map((i) => i.id)));
+      if (later) fd.append("scheduled_at", whenAt);
+      fd.append("disable_bot", botOff ? "true" : "false");
+      if (state.imageFile) fd.append("image", state.imageFile);
+      if (state.editing && state.removeImage && !state.imageFile) fd.append("remove_image", "true");
+      const path = state.editing
+        ? `/doctors/${sessionDoctorId}/bulk-sends/${state.editing.id}`
+        : `/doctors/${sessionDoctorId}/bulk-sends`;
+      const res = await apiFetch(path, { method: state.editing ? "PUT" : "POST", body: fd });
+      if (await handleUnauthorized(res)) return;
+      if (!res.ok) {
+        const errEl = body.querySelector(".bulk-review-error");
+        errEl.textContent = await apiErrorDetail(res, "No se pudo guardar el envío.");
+        errEl.style.display = "block";
+        btn.disabled = false;
+        return;
+      }
+      close();
+      resetState();
+      renderForm();
+      await loadHistory(0);
+    });
+  }
+
+  // ── Historial ──
+  const HISTORY_LIMIT = 10;
+  const historyBox = wrap.querySelector("#bulk-history");
+
+  async function loadHistory(offset) {
+    const res = await apiFetch(
+      `/doctors/${sessionDoctorId}/bulk-sends?limit=${HISTORY_LIMIT}&offset=${offset}`
+    );
+    if (await handleUnauthorized(res)) return;
+    if (!res.ok) {
+      historyBox.innerHTML = `<div class="error">No se pudo cargar el historial.</div>`;
+      return;
+    }
+    const data = await res.json();
+    if (!data.items.length) {
+      historyBox.innerHTML = `<p class="meta">Aún no hay envíos masivos.</p>`;
+      return;
+    }
+    const rows = data.items
+      .map((b) => {
+        const when = b.status === "scheduled" ? `Programado: ${formatChile(b.scheduled_at)}` : formatChile(b.started_at || b.scheduled_at);
+        const results =
+          b.status === "done"
+            ? `${b.sent_count} enviados · ${b.skipped_count} omitidos (ventana cerrada)${b.failed_count ? ` · ${b.failed_count} con error` : ""}`
+            : `${b.recipient_count} contactos`;
+        const actions =
+          b.status === "scheduled"
+            ? `<button type="button" class="btn sm secondary" data-edit="${b.id}">Editar</button>
+               <button type="button" class="btn sm secondary" data-cancel="${b.id}">Cancelar</button>`
+            : "";
+        return `<tr>
+          <td>${escapeHtml(when)}</td>
+          <td><span class="bulk-status bulk-status-${escapeAttr(b.status)}">${escapeHtml(BULK_STATUS_LABELS[b.status] || b.status)}</span></td>
+          <td class="cell-preview">${escapeHtml(knowledgeTruncate(b.message, 80))}${b.has_image ? ` <span class="meta">(con imagen)</span>` : ""}</td>
+          <td>${escapeHtml(results)}</td>
+          <td>${b.disable_bot ? "Apaga el bot" : "Bot responde"}</td>
+          <td class="table-actions">${actions}</td>
+        </tr>`;
+      })
+      .join("");
+    const page = Math.floor(offset / HISTORY_LIMIT) + 1;
+    const pages = Math.max(1, Math.ceil(data.total / HISTORY_LIMIT));
+    historyBox.innerHTML = `
+      <div class="table-scroll"><table>
+        <thead><tr><th>Fecha (Chile)</th><th>Estado</th><th>Mensaje</th><th>Resultado</th><th>Bot</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <div class="form-actions">
+        <button type="button" class="secondary sm" id="hist-prev" ${offset <= 0 ? "disabled" : ""}>Anterior</button>
+        <span class="meta">Página ${page} de ${pages}</span>
+        <button type="button" class="secondary sm" id="hist-next" ${page >= pages ? "disabled" : ""}>Siguiente</button>
+      </div>
+    `;
+    historyBox.querySelector("#hist-prev").addEventListener("click", () => loadHistory(Math.max(0, offset - HISTORY_LIMIT)));
+    historyBox.querySelector("#hist-next").addEventListener("click", () => loadHistory(offset + HISTORY_LIMIT));
+    historyBox.querySelectorAll("[data-edit]").forEach((btn) =>
+      btn.addEventListener("click", async () => {
+        const r = await apiFetch(`/doctors/${sessionDoctorId}/bulk-sends/${btn.dataset.edit}`);
+        if (!r.ok) return window.alert("No se pudo cargar el envío.");
+        const detail = await r.json();
+        if (detail.status !== "scheduled") {
+          window.alert("Este envío ya salió o fue cancelado.");
+          return loadHistory(offset);
+        }
+        resetState(detail);
+        renderForm();
+        formCard.scrollIntoView({ behavior: "smooth" });
+      })
+    );
+    historyBox.querySelectorAll("[data-cancel]").forEach((btn) =>
+      btn.addEventListener("click", async () => {
+        if (!window.confirm("¿Cancelar este envío programado? No se enviará a nadie.")) return;
+        const r = await apiFetch(`/doctors/${sessionDoctorId}/bulk-sends/${btn.dataset.cancel}/cancel`, {
+          method: "POST",
+        });
+        if (!r.ok) window.alert(await apiErrorDetail(r, "No se pudo cancelar el envío."));
+        if (state.editing && String(state.editing.id) === btn.dataset.cancel) {
+          resetState();
+          renderForm();
+        }
+        loadHistory(offset);
+      })
+    );
+  }
+
+  resetState();
+  renderForm();
+  await loadHistory(0);
+}
+
+// ── Catchup ─────────────────────────────────────────────────────────────────
+
+async function renderCatchup(container) {
+  container.innerHTML = "";
+  container.classList.remove("chat-mode");
+
+  const wrap = el(`
+    <div class="card">
+      <h1>Catchup</h1>
+      <p class="meta">
+        Un mensaje automático (por ejemplo "¿Quieres algo más?") que se envía a cada paciente unas horas después
+        de su último mensaje, para darle la oportunidad de seguir la conversación.
+      </p>
+      ${whatsappRulesHtml({
+        title: "Cómo funciona: lee esto antes de activarlo",
+        items: [
+          [
+            "No extiende la ventana",
+            "WhatsApp solo deja escribirle a un paciente durante las 24 horas siguientes a su último mensaje. " +
+              "El catchup NO alarga ese plazo: solo sirve si el paciente responde. Si responde, la ventana se " +
+              "abre de nuevo y el bot le contesta como siempre.",
+          ],
+          [
+            "¿Cuándo sale?",
+            "A las N horas del último mensaje del paciente, solo dentro del horario permitido (hora de Chile). " +
+              "Si ese momento cae fuera del horario, se adelanta al final del horario anterior. Si no hay un " +
+              "horario permitido entre el mensaje del paciente y ese momento, ese catchup no se envía. Si el " +
+              "paciente escribe antes, el catchup se recalcula desde su nuevo mensaje.",
+          ],
+          [
+            "¿Por qué no existe \"cada X días\"?",
+            "Porque nuestro mensaje no reabre la ventana: pasadas 24 horas sin que el paciente escriba, WhatsApp " +
+              "ya no permite escribirle. Por eso el catchup sale como máximo una vez por cada mensaje del paciente.",
+          ],
+          RULE_COST,
+          RULE_BLOCKS,
+        ],
+      })}
+      <div id="cu-message" style="display:none"></div>
+      <div id="cu-body"><p class="meta">Cargando…</p></div>
+    </div>
+  `);
+  container.appendChild(wrap);
+  const bodyEl = wrap.querySelector("#cu-body");
+  const msgEl = wrap.querySelector("#cu-message");
+
+  function showMessage(text, kind) {
+    msgEl.textContent = text;
+    msgEl.className = kind;
+    msgEl.style.display = text ? "block" : "none";
+  }
+
+  const classifications = (await fetchContactClassifications()) || [];
+  if (sessionDoctorId == null) return;
+  const res = await apiFetch(`/doctors/${sessionDoctorId}/catchup-settings`);
+  if (await handleUnauthorized(res)) return;
+  if (!res.ok) {
+    bodyEl.innerHTML = "";
+    showMessage("No se pudo cargar la configuración. Intenta nuevamente.", "error");
+    return;
+  }
+  let data = await res.json();
+
+  const hourOptions = (from, to, selected) =>
+    Array.from({ length: to - from + 1 }, (_, k) => from + k)
+      .map((h) => `<option value="${h}" ${h === selected ? "selected" : ""}>${String(h).padStart(2, "0")}:00</option>`)
+      .join("");
+
+  function renderForm() {
+    const excludedTags = new Set(data.excluded_tags);
+    const excludedCcs = new Set(data.excluded_classification_ids);
+    const stateOptions = [["__none__", "Sin estado"], ...CONVERSATION_STATES.map((s) => [s, s])];
+    bodyEl.innerHTML = `
+      <label class="check-option cu-enabled"><input type="checkbox" id="cu-enabled" ${data.enabled ? "checked" : ""} />
+        <strong>Catchup activado</strong></label>
+      <p class="meta">Al activarlo, también se enviará a pacientes que escribieron en las últimas horas.</p>
+
+      <label for="cu-text">Mensaje</label>
+      <textarea id="cu-text" rows="4" placeholder="Ej.: ¿Hay algo más en lo que te pueda ayudar?">${escapeHtml(data.message)}</textarea>
+      <div class="char-counter meta" id="cu-counter"></div>
+
+      ${
+        OUTBOUND_IMAGES_ENABLED
+          ? `<label>Imagen (opcional, JPG o PNG, hasta 5 MB)</label>
+             <div id="cu-image"></div>
+             <input type="file" id="cu-image-input" accept="image/jpeg,image/png" />`
+          : data.has_image
+          ? `<label>Imagen</label>
+             <p class="meta">Por ahora no se pueden enviar imágenes. Quita la imagen para que el catchup salga solo con texto.</p>
+             <div id="cu-image"></div>`
+          : `<div id="cu-image"></div>`
+      }
+
+      <h3 class="form-section-title">Cuándo se envía</h3>
+      <div class="inline-form">
+        <input type="number" id="cu-hours" min="1" max="23" step="1" value="${data.hours_after}" />
+        <span class="meta">horas después del último mensaje del paciente</span>
+      </div>
+      <div class="inline-form">
+        <span class="meta">Horario permitido (hora de Chile): desde</span>
+        <select id="cu-start">${hourOptions(0, 23, data.allowed_start_hour)}</select>
+        <span class="meta">hasta</span>
+        <select id="cu-end">${hourOptions(1, 24, data.allowed_end_hour)}</select>
+      </div>
+      <div class="inline-form">
+        <span class="meta">Margen de seguridad antes de que cierre la ventana:</span>
+        <input type="number" id="cu-margin" min="1" max="60" step="1" value="${data.window_margin_minutes}" />
+        <span class="meta">minutos (de 1 a 60)</span>
+      </div>
+
+      <h3 class="form-section-title">Repetición</h3>
+      <label class="check-option"><input type="radio" name="cu-repeat" value="unlimited" ${data.max_streak == null ? "checked" : ""} />
+        Un catchup por cada mensaje del paciente, sin límite</label>
+      <label class="check-option"><input type="radio" name="cu-repeat" value="max" ${data.max_streak != null ? "checked" : ""} />
+        Como máximo
+        <input type="number" id="cu-max" min="1" max="100" step="1" value="${data.max_streak ?? 2}" class="input-sm" />
+        catchups seguidos sin que el paciente escriba por su cuenta</label>
+      <p class="meta">Si el paciente solo responde a un catchup, sigue contando como "seguido". El conteo vuelve a cero cuando
+        escribe después de un mensaje que no era catchup.</p>
+
+      <h3 class="form-section-title">A quiénes</h3>
+      <label class="check-option"><input type="checkbox" id="cu-bot-off" ${data.send_when_bot_disabled ? "checked" : ""} />
+        Enviar también a conversaciones con el bot apagado</label>
+      <div class="bulk-filters">
+        <div>
+          <span class="filter-field-label">No enviar a estos estados</span>
+          <div class="check-list" id="cu-tags">
+            ${stateOptions
+              .map(
+                ([v, label]) => `<label class="check-option"><input type="checkbox" value="${escapeAttr(v)}" ${
+                  excludedTags.has(v) ? "checked" : ""
+                } /> ${escapeHtml(label)}</label>`
+              )
+              .join("")}
+          </div>
+        </div>
+        <div>
+          <span class="filter-field-label">No enviar a estas clasificaciones (por ejemplo, "ya operados")</span>
+          <div class="check-list" id="cu-ccs">
+            ${
+              classifications.length
+                ? classifications
+                    .map(
+                      (cc) => `<label class="check-option"><input type="checkbox" value="${cc.id}" ${
+                        excludedCcs.has(cc.id) ? "checked" : ""
+                      } /> ${contactBadgeHtml(cc)}</label>`
+                    )
+                    .join("")
+                : `<p class="meta">Aún no hay clasificaciones. <a href="#/classifications">Crear clasificaciones</a></p>`
+            }
+          </div>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button type="button" id="cu-save">Guardar</button>
+      </div>
+    `;
+
+    const textInp = bodyEl.querySelector("#cu-text");
+    const counter = bodyEl.querySelector("#cu-counter");
+    const refreshCounter = () => updateOutboundCounter(counter, textInp.value.trim(), data.has_image);
+    textInp.addEventListener("input", refreshCounter);
+    refreshCounter();
+
+    const imageBox = bodyEl.querySelector("#cu-image");
+    if (data.has_image) {
+      // Parámetro de versión para que el navegador no muestre la imagen anterior.
+      const src = `${resolveApiUrl(data.image_url)}?v=${encodeURIComponent(data.updated_at || "")}`;
+      imageBox.innerHTML = `<div class="image-preview"><img src="${escapeAttr(src)}" alt="Imagen del catchup" />
+        <button type="button" class="secondary sm" id="cu-image-remove">Quitar imagen</button></div>`;
+      imageBox.querySelector("#cu-image-remove").addEventListener("click", async () => {
+        const r = await apiFetch(`/doctors/${sessionDoctorId}/catchup-settings/image`, { method: "DELETE" });
+        if (!r.ok) return showMessage(await apiErrorDetail(r, "No se pudo quitar la imagen."), "error");
+        data = await r.json();
+        showMessage("Imagen quitada.", "success");
+        renderForm();
+      });
+    }
+    const imageInput = bodyEl.querySelector("#cu-image-input");
+    if (imageInput) imageInput.addEventListener("change", async (ev) => {
+      const file = ev.target.files && ev.target.files[0];
+      const err = outboundImageError(file);
+      if (err) {
+        ev.target.value = "";
+        return showMessage(err, "error");
+      }
+      if (!file) return;
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await apiFetch(`/doctors/${sessionDoctorId}/catchup-settings/image`, { method: "POST", body: fd });
+      if (!r.ok) {
+        ev.target.value = "";
+        return showMessage(await apiErrorDetail(r, "No se pudo subir la imagen."), "error");
+      }
+      data = await r.json();
+      showMessage("Imagen guardada.", "success");
+      renderForm();
+    });
+
+    bodyEl.querySelector("#cu-save").addEventListener("click", async () => {
+      showMessage("", "error");
+      const repeatMax = bodyEl.querySelector('input[name="cu-repeat"]:checked').value === "max";
+      const payload = {
+        enabled: bodyEl.querySelector("#cu-enabled").checked,
+        message: textInp.value.trim(),
+        hours_after: parseInt(bodyEl.querySelector("#cu-hours").value, 10),
+        allowed_start_hour: parseInt(bodyEl.querySelector("#cu-start").value, 10),
+        allowed_end_hour: parseInt(bodyEl.querySelector("#cu-end").value, 10),
+        max_streak: repeatMax ? parseInt(bodyEl.querySelector("#cu-max").value, 10) : null,
+        send_when_bot_disabled: bodyEl.querySelector("#cu-bot-off").checked,
+        excluded_tags: Array.from(bodyEl.querySelectorAll("#cu-tags input:checked")).map((i) => i.value),
+        excluded_classification_ids: Array.from(bodyEl.querySelectorAll("#cu-ccs input:checked")).map((i) =>
+          parseInt(i.value, 10)
+        ),
+        window_margin_minutes: parseInt(bodyEl.querySelector("#cu-margin").value, 10),
+      };
+      if (payload.enabled && !data.enabled) {
+        const ok = window.confirm(
+          "Al activar el catchup, también se enviará a pacientes que escribieron en las últimas horas " +
+            "(si ya se cumplió su plazo y estamos dentro del horario permitido). ¿Activar?"
+        );
+        if (!ok) return;
+      }
+      const r = await apiFetch(`/doctors/${sessionDoctorId}/catchup-settings`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      if (await handleUnauthorized(r)) return;
+      if (!r.ok) return showMessage(await apiErrorDetail(r, "No se pudo guardar. Revisa los campos."), "error");
+      data = await r.json();
+      renderForm();
+      showMessage("Configuración guardada.", "success");
+    });
+  }
+
+  renderForm();
+}
+
 // ── Prompt del asistente ────────────────────────────────────────────────────
 
 async function renderSystemPrompt(container) {
@@ -1718,6 +2766,13 @@ async function renderSystemPrompt(container) {
   load(data);
 }
 
+const MESSAGE_SOURCE_LABELS = {
+  bot: "Bot",
+  human: "Humano",
+  bulk: "Mensaje masivo",
+  catchup: "Catchup",
+};
+
 function buildMessageBubble(m) {
   const isUser = m.role === "user";
   const isSystem = m.role === "system";
@@ -1762,9 +2817,17 @@ function buildMessageBubble(m) {
   row.dataset.msgId = String(m.id);
   if (m.created_at) row.dataset.ts = m.created_at;
 
+  // Origen de cada mensaje enviado (los antiguos sin origen se muestran como "Bot").
+  const sourceHtml = isUser
+    ? ""
+    : `<span class="msg-source msg-source-${escapeAttr(MESSAGE_SOURCE_LABELS[m.source] ? m.source : "bot")}">${escapeHtml(
+        MESSAGE_SOURCE_LABELS[m.source] || MESSAGE_SOURCE_LABELS.bot
+      )}</span>`;
+
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   bubble.innerHTML =
+    sourceHtml +
     `<div class="bubble-content">${escapeHtml(m.content)}</div>` +
     (attHtml ? `<div class="attachment-chips">${attHtml}</div>` : "") +
     `<div class="bubble-time">${escapeHtml(time)}</div>`;
@@ -2336,6 +3399,14 @@ async function render() {
   }
   if (route.view === "classifications") {
     await renderClassifications(app, route);
+    return;
+  }
+  if (route.view === "bulk-send") {
+    await renderBulkSend(app, route);
+    return;
+  }
+  if (route.view === "catchup") {
+    await renderCatchup(app, route);
     return;
   }
   await renderDashboard(app, route);
