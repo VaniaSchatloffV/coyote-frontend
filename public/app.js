@@ -1558,6 +1558,10 @@ const OUTBOUND_TEXT_MAX = 1600;
 const OUTBOUND_CAPTION_MAX = 1024;
 const OUTBOUND_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const OUTBOUND_IMAGE_TYPES = ["image/jpeg", "image/png"];
+// Agregar imágenes al envío masivo y al catchup: deshabilitado mientras se corrige el
+// enlace de S3 que Twilio no puede descargar (403). Para reactivarlo, poner true.
+// Con false, una imagen ya guardada se sigue mostrando, solo con la opción de quitarla.
+const OUTBOUND_IMAGES_ENABLED = false;
 const CONVERSATION_STATES = [
   "Preguntas frecuentes",
   "Agendamiento",
@@ -1700,7 +1704,9 @@ async function renderBulkSend(container) {
     <div>
       <div class="card">
         <h1>Envío masivo</h1>
-        <p class="meta">Envía un mismo mensaje (texto y, si quieres, una imagen) a muchos contactos a la vez.</p>
+        <p class="meta">Envía un mismo mensaje${
+          OUTBOUND_IMAGES_ENABLED ? " (texto y, si quieres, una imagen)" : ""
+        } a muchos contactos a la vez.</p>
         ${whatsappRulesHtml({
           title: "Antes de enviar: lee esto",
           items: [
@@ -1874,10 +1880,18 @@ async function renderBulkSend(container) {
       <h3 class="form-section-title">2. Mensaje</h3>
       <textarea id="bulk-message" rows="5" placeholder="Escribe el mensaje…">${escapeHtml(editing ? editing.message : "")}</textarea>
       <div class="char-counter meta" id="bulk-counter"></div>
-      <label>Imagen (opcional, JPG o PNG, hasta 5 MB)</label>
-      <div id="bulk-image-current"></div>
-      <input type="file" id="bulk-image" accept="image/jpeg,image/png" />
-      <div id="bulk-image-error" class="error" style="display:none"></div>
+      ${
+        OUTBOUND_IMAGES_ENABLED
+          ? `<label>Imagen (opcional, JPG o PNG, hasta 5 MB)</label>
+             <div id="bulk-image-current"></div>
+             <input type="file" id="bulk-image" accept="image/jpeg,image/png" />
+             <div id="bulk-image-error" class="error" style="display:none"></div>`
+          : editing && editing.has_image
+          ? `<label>Imagen</label>
+             <p class="meta">Por ahora no se pueden enviar imágenes. Quita la imagen para que el envío salga solo con texto.</p>
+             <div id="bulk-image-current"></div>`
+          : `<div id="bulk-image-current"></div>`
+      }
 
       <h3 class="form-section-title">3. Cuándo</h3>
       <label class="check-option"><input type="radio" name="bulk-when" value="now" ${
@@ -1946,7 +1960,7 @@ async function renderBulkSend(container) {
     }
 
     msgInp.addEventListener("input", refreshCounter);
-    imageInp.addEventListener("change", () => {
+    if (imageInp) imageInp.addEventListener("change", () => {
       const file = imageInp.files && imageInp.files[0];
       const err = outboundImageError(file);
       imageErr.textContent = err;
@@ -2416,9 +2430,17 @@ async function renderCatchup(container) {
       <textarea id="cu-text" rows="4" placeholder="Ej.: ¿Hay algo más en lo que te pueda ayudar?">${escapeHtml(data.message)}</textarea>
       <div class="char-counter meta" id="cu-counter"></div>
 
-      <label>Imagen (opcional, JPG o PNG, hasta 5 MB)</label>
-      <div id="cu-image"></div>
-      <input type="file" id="cu-image-input" accept="image/jpeg,image/png" />
+      ${
+        OUTBOUND_IMAGES_ENABLED
+          ? `<label>Imagen (opcional, JPG o PNG, hasta 5 MB)</label>
+             <div id="cu-image"></div>
+             <input type="file" id="cu-image-input" accept="image/jpeg,image/png" />`
+          : data.has_image
+          ? `<label>Imagen</label>
+             <p class="meta">Por ahora no se pueden enviar imágenes. Quita la imagen para que el catchup salga solo con texto.</p>
+             <div id="cu-image"></div>`
+          : `<div id="cu-image"></div>`
+      }
 
       <h3 class="form-section-title">Cuándo se envía</h3>
       <div class="inline-form">
@@ -2506,7 +2528,8 @@ async function renderCatchup(container) {
         renderForm();
       });
     }
-    bodyEl.querySelector("#cu-image-input").addEventListener("change", async (ev) => {
+    const imageInput = bodyEl.querySelector("#cu-image-input");
+    if (imageInput) imageInput.addEventListener("change", async (ev) => {
       const file = ev.target.files && ev.target.files[0];
       const err = outboundImageError(file);
       if (err) {
